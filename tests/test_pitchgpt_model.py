@@ -429,6 +429,23 @@ def test_pitchgpt_returns_intermediates_when_requested():
 
 
 # ============================================================
+# ADR 013: type-conditioned execution heads
+# ============================================================
+
+
+def test_type_conditioned_heads_flag_defaults_off():
+    from model.config import PitchGPTConfig, tiny_config
+    assert PitchGPTConfig().type_conditioned_heads is False
+    assert tiny_config().type_conditioned_heads is False
+
+
+def test_type_conditioned_heads_flag_can_be_set():
+    from model.config import PitchGPTConfig
+    cfg = PitchGPTConfig(type_conditioned_heads=True)
+    assert cfg.type_conditioned_heads is True
+
+
+# ============================================================
 # ADR 007: stop-gradient between result head and trunk
 # ============================================================
 
