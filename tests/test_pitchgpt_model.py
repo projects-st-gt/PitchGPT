@@ -517,6 +517,39 @@ def test_type_conditioned_heads_change_execution_logits():
     assert torch.allclose(ta, tb), "type head was perturbed by the type-fusion path"
 
 
+def test_execution_logits_for_type_marginal_sums_to_one():
+    import torch
+    import torch.nn.functional as F
+    from model.config import tiny_config
+    from model.pitchgpt import PitchGPT
+    from data.dataset import PITCH_TYPES, MODEL_TYPE_ID
+
+    cfg = tiny_config()
+    cfg.type_conditioned_heads = True
+    model = PitchGPT(cfg).eval()
+    batch = _fake_batch(2, 6, cfg)   # (B=2, T=6) — match _fake_batch's signature
+
+    with torch.no_grad():
+        out = model(**batch)
+        # TYPE head emits 8 logits with PAD at index 0 (see CLAUDE.md). PAD is
+        # not a treatment a pitcher can choose, so π̂(type|h) for a marginal
+        # over treatments is the softmax restricted to the 7 real types and
+        # renormalized — otherwise the weights sum to 1 - π̂(PAD) < 1.
+        type_ids = [MODEL_TYPE_ID[pt] for pt in PITCH_TYPES]
+        type_logits = out["propensity"]["type"][..., type_ids]  # (B, T_total, 7)
+        type_probs = F.softmax(type_logits, dim=-1)
+        marginal = torch.zeros_like(out["propensity"]["zone"])
+        for i, pt in enumerate(PITCH_TYPES):
+            tid = MODEL_TYPE_ID[pt]
+            cond = model.execution_logits_for_type(batch, type_id=tid)["zone"]
+            w = type_probs[..., i:i + 1]
+            marginal = marginal + w * F.softmax(cond, dim=-1)
+
+    NC = PitchGPT.N_CONTEXT_TOKENS
+    s = marginal[:, NC:, :].sum(dim=-1)
+    assert torch.allclose(s, torch.ones_like(s), atol=1e-4)
+
+
 # ============================================================
 # ADR 007: stop-gradient between result head and trunk
 # ============================================================
