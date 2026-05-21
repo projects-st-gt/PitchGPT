@@ -550,6 +550,28 @@ def test_execution_logits_for_type_marginal_sums_to_one():
     assert torch.allclose(s, torch.ones_like(s), atol=1e-4)
 
 
+def test_nuisance_exposes_marginal_zone_backcompat():
+    import pandas as pd
+    from pathlib import Path
+    from causal.nuisance import NuisanceModels, build_single_ab_batch
+
+    ck = Path("checkpoints_modal/tiny-fold0-v6/checkpoint_calibrated.pt")
+    if not ck.exists():
+        import pytest; pytest.skip("v6 checkpoint not present")
+    nu = NuisanceModels(ck, device="cpu")
+    val = pd.read_parquet("data/augmented/2024/2024-04-01.parquet")
+    g = (val.sort_values(["game_pk", "at_bat_number", "pitch_number"])
+            .groupby(["game_pk", "at_bat_number"]))
+    ab = next(grp for _, grp in g if len(grp) >= 4)
+    batch = build_single_ab_batch(nu, ab.reset_index(drop=True))
+    out = nu.forward(batch)
+    # v6 has type_conditioned_heads=False -> marginal == plain zone head output.
+    assert out.marginal_propensity_probs["zone"].shape == out.propensity_probs["zone"].shape
+    z = out.marginal_propensity_probs["zone"][0, nu.model.N_CONTEXT_TOKENS + 1]
+    print(f"marginal zone @ pitch1 sums to {float(z.sum()):.4f}")
+    assert abs(float(z.sum()) - 1.0) < 1e-3
+
+
 # ============================================================
 # ADR 007: stop-gradient between result head and trunk
 # ============================================================

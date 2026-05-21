@@ -60,6 +60,7 @@ class ForwardOut:
 
     propensity_logits: dict[str, torch.Tensor]
     propensity_probs: dict[str, torch.Tensor]
+    marginal_propensity_probs: dict[str, torch.Tensor]
     result_logits: torch.Tensor
     result_probs: torch.Tensor
     ab_outcome_logits: torch.Tensor
@@ -210,9 +211,38 @@ class NuisanceModels:
         ab_scaled = self._apply_temp(ab_raw, "ab_outcome")
         ab_probs = F.softmax(ab_scaled, dim=-1)
 
+        # Type-marginal execution distributions (ADR-013). For a checkpoint
+        # WITHOUT type_conditioned_heads this is identical to prop_probs (the
+        # heads were already type-marginal). With it, marginalize:
+        #   P(exec | h) = Σ_type π̂(type | h) · P(exec | type, h),
+        # where π̂(type) is the type-head softmax RENORMALIZED over the 7 real
+        # pitch types — the PAD logit at index 0 is excluded (PAD is not a
+        # treatment; including it leaves the marginal ~10% short of 1).
+        marginal_probs: dict[str, torch.Tensor] = dict(prop_probs)
+        if getattr(self.model.config, "type_conditioned_heads", False):
+            from data.dataset import (
+                PITCH_TYPES, MODEL_TYPE_ID,
+                MODEL_PITCH_TYPES_START_IDX, MODEL_PITCH_TYPES_END_IDX,
+            )
+            type_p = prop_probs["type"]  # (B, T, 8) post-temperature softmax
+            real_w = type_p[..., MODEL_PITCH_TYPES_START_IDX:MODEL_PITCH_TYPES_END_IDX]
+            real_w = real_w / real_w.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+            heads = ("zone", "velo", "spin_rate")
+            acc = {h: torch.zeros_like(prop_probs[h]) for h in heads}
+            for i, pt in enumerate(PITCH_TYPES):
+                tid = MODEL_TYPE_ID[pt]
+                cond_logits = self.model.execution_logits_for_type(bd, type_id=tid)
+                w = real_w[..., i:i + 1]
+                for h in heads:
+                    cond = F.softmax(self._apply_temp(cond_logits[h].cpu().float(), h), dim=-1)
+                    acc[h] = acc[h] + w * cond
+            for h in heads:
+                marginal_probs[h] = acc[h]
+
         return ForwardOut(
             propensity_logits=prop_logits,
             propensity_probs=prop_probs,
+            marginal_propensity_probs=marginal_probs,
             result_logits=result_raw,
             result_probs=result_probs,
             ab_outcome_logits=ab_raw,
