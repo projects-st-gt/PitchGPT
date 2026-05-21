@@ -468,6 +468,55 @@ def test_propensity_heads_separate_exec_hidden():
     assert not torch.allclose(out_default["velo"], out_split["velo"])
 
 
+def test_type_conditioned_heads_change_execution_logits():
+    """With the flag on, changing the NEXT pitch's type changes zone/velo/spin
+    logits at the conditioned position, while leaving the TYPE head untouched.
+
+    Isolation: the trunk is causal, so hidden[t] depends only on
+    type[0..t]. Changing type ONLY at the last position T-1 therefore leaves
+    hidden[t] (and the type logits) for every t <= T-2 unchanged, but it DOES
+    change next_type[T-2] = type[T-1] — the value the type-fusion MLP consumes
+    at position T-2. So any movement in the zone/velo logits at position T-2
+    must come through the type-fusion path, not the trunk.
+    """
+    import torch
+    from model.config import tiny_config
+    from model.pitchgpt import PitchGPT
+
+    cfg = tiny_config()
+    cfg.type_conditioned_heads = True
+    model = PitchGPT(cfg).eval()
+
+    B, T = 2, 5
+    batch = _fake_batch(B, T, cfg)
+    NC = PitchGPT.N_CONTEXT_TOKENS
+    last = T - 1          # pitch index changed
+    cond = T - 2          # position conditioned on next_type == type[last]
+
+    with torch.no_grad():
+        out_a = model(**batch)
+        batch_b = {**batch, "pitch_factors": {**batch["pitch_factors"]}}
+        flipped = batch_b["pitch_factors"]["type"].clone()
+        flipped[:, last] = 1  # last pitch -> FF (model id 1); earlier untouched
+        batch_b["pitch_factors"]["type"] = flipped
+        out_b = model(**batch_b)
+
+    # Execution heads at the conditioned position MUST move: only the
+    # type-fusion path connects type[last] to the zone/velo logits at cond.
+    za = out_a["propensity"]["zone"][:, NC + cond, :]
+    zb = out_b["propensity"]["zone"][:, NC + cond, :]
+    assert not torch.allclose(za, zb), "zone head ignored the next-pitch type"
+    va = out_a["propensity"]["velo"][:, NC + cond, :]
+    vb = out_b["propensity"]["velo"][:, NC + cond, :]
+    assert not torch.allclose(va, vb), "velo head ignored the next-pitch type"
+
+    # TYPE head at the conditioned position reads the raw hidden, which is
+    # causal and so unaffected by type[last]. It must NOT move.
+    ta = out_a["propensity"]["type"][:, NC + cond, :]
+    tb = out_b["propensity"]["type"][:, NC + cond, :]
+    assert torch.allclose(ta, tb), "type head was perturbed by the type-fusion path"
+
+
 # ============================================================
 # ADR 007: stop-gradient between result head and trunk
 # ============================================================

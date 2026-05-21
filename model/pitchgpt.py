@@ -109,6 +109,24 @@ class PitchGPT(nn.Module):
                     nn.init.normal_(m.weight, mean=0.0, std=config.init_std)
                     nn.init.zeros_(m.bias)
 
+        # Type-conditioned execution heads (ADR-013). A fusion MLP combines
+        # the trunk hidden at position t with the embedding of the NEXT
+        # pitch's type, producing the input the execution heads (zone/velo/
+        # spin) read. Same pattern as the situational fusion above. The TYPE
+        # head is untouched — it reads the raw hidden.
+        if config.type_conditioned_heads:
+            d = config.d_model
+            self.type_fusion = nn.Sequential(
+                nn.Linear(2 * d, d),  # [hidden, next_type_emb]
+                nn.GELU(),
+                nn.Dropout(config.dropout),
+                nn.Linear(d, d),
+            )
+            for m in self.type_fusion.modules():
+                if isinstance(m, nn.Linear):
+                    nn.init.normal_(m.weight, mean=0.0, std=config.init_std)
+                    nn.init.zeros_(m.bias)
+
         # ADR 012 ("fix #2"): FiLM-condition the trunk on the player profile —
         # an MLP maps (pitcher ++ batter) profile → per-layer (gamma, beta),
         # and each transformer block's input is modulated `gamma_l * x + beta_l`,
@@ -302,6 +320,27 @@ class PitchGPT(nn.Module):
             propensity_logits = self.propensity(x_for_prop)
         else:
             propensity_logits = self.propensity(x)
+
+        # 6a. Type-conditioned execution heads (ADR-013). Fuse the pitch-
+        #     position hidden with the NEXT pitch's type embedding. type[t+1]
+        #     is the shift-left of pitch_factors["type"] (last position -> PAD,
+        #     loss-ignored). At rollout the caller writes the sampled/intervened
+        #     type into pitch_factors["type"], so the same path serves do(.).
+        if self.config.type_conditioned_heads:
+            NC = self.N_CONTEXT_TOKENS
+            def _shift_left_type(v: torch.Tensor) -> torch.Tensor:
+                return torch.cat([v[:, 1:], torch.zeros_like(v[:, :1])], dim=1)
+            next_type = _shift_left_type(pitch_factors["type"])
+            next_type_emb = self.embed.type_emb(next_type)
+            uses_xprop = self.config.propensity_situational or self.config.inject_profiles_to_head
+            hidden_for_heads = x_for_prop if uses_xprop else x
+            base_hidden = hidden_for_heads[:, NC:, :]
+            hidden_exec_pitch = self.type_fusion(
+                torch.cat([base_hidden, next_type_emb], dim=-1)
+            )
+            hidden_exec_full = hidden_for_heads.clone()
+            hidden_exec_full[:, NC:, :] = hidden_exec_pitch
+            propensity_logits = self.propensity(hidden_for_heads, hidden_exec=hidden_exec_full)
 
         # 6b. Optional two-stage propensity TYPE head — overrides the type
         # logits at pitch positions with an MLP that reads (hidden, type_emb,
