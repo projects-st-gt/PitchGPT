@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.ruff_cache/
+.venv/
+*.egg-info/
+build/
+dist/
+
+# Data outputs — large, regenerable, never in git.
+# Keep data/ Python code; ignore every data subdirectory/file under it.
+data/*
+!data/*.py
+
+# Large root data dumps
+Q2_pitches_train.csv
+Q2_pitches_test_probabilities.csv
+
+# Models and checkpoints
+checkpoints/
+checkpoints_modal/
+*.pt
+*.ckpt
+*.safetensors
+
+# Eval artifacts
+eval/results/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/*.tsbuildinfo
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
