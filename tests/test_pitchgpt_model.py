@@ -445,6 +445,29 @@ def test_type_conditioned_heads_flag_can_be_set():
     assert cfg.type_conditioned_heads is True
 
 
+def test_propensity_heads_separate_exec_hidden():
+    import torch
+    from model.config import tiny_config
+    from model.heads import PropensityHeads
+    from model.embeddings import FactorEmbeddings
+
+    cfg = tiny_config()
+    emb = FactorEmbeddings(cfg)
+    heads = PropensityHeads(cfg, emb.type_emb.weight, emb.zone_emb.weight)
+
+    hidden = torch.randn(2, 5, cfg.d_model)
+    hidden_exec = torch.randn(2, 5, cfg.d_model)
+
+    out_default = heads(hidden)                       # hidden_exec=None -> uses hidden
+    out_split = heads(hidden, hidden_exec=hidden_exec)
+
+    # Type head ignores hidden_exec - identical in both calls.
+    assert torch.allclose(out_default["type"], out_split["type"])
+    # Execution heads differ because hidden_exec differs.
+    assert not torch.allclose(out_default["zone"], out_split["zone"])
+    assert not torch.allclose(out_default["velo"], out_split["velo"])
+
+
 # ============================================================
 # ADR 007: stop-gradient between result head and trunk
 # ============================================================
