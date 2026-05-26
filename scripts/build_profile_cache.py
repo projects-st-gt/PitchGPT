@@ -180,13 +180,28 @@ def _composite_sort_key(
     ``game_num < 100`` (always true in MLB — doubleheaders give ``game_num``
     of 1 or 2). This lets us use ``np.searchsorted`` for fast asof cutoff
     instead of a full boolean filter per key.
+
+    **Datetime-unit discipline (pandas 3.x):** parquets can land here as
+    ``datetime64[us]`` rather than ``[ns]``. ``astype("int64")`` then yields
+    µs-since-epoch, and ``// _NS_PER_DAY`` is off by 1000×, producing nonsense
+    cutoffs that look like "everything before asof" silently. The
+    ``astype("datetime64[ns]")`` round-trip normalizes to ns first so the
+    division gives days regardless of the input unit. (Matching pattern in
+    :func:`_composite_asof_key` below.)
     """
-    # Convert datetime-like to int64 nanoseconds since epoch, then floor to days.
-    date_ord = pd.to_datetime(dates).astype("int64").to_numpy() // _NS_PER_DAY
+    date_ord = (
+        pd.to_datetime(dates)
+        .astype("datetime64[ns]")
+        .astype("int64")
+        .to_numpy()
+        // _NS_PER_DAY
+    )
     return date_ord * 100 + nums.astype("int64")
 
 
 def _composite_asof_key(asof_date: pd.Timestamp, asof_num: int) -> int:
+    # ``pd.Timestamp.value`` is always ns-since-epoch regardless of source dtype
+    # (Timestamp internally normalizes), so this path is already unit-safe.
     asof_ord = int(asof_date.value // _NS_PER_DAY)
     return asof_ord * 100 + int(asof_num)
 
