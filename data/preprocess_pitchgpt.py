@@ -372,6 +372,44 @@ def compute_tto_bucket(pitches: pd.DataFrame) -> pd.Series:
     return merged["tto"].fillna(0).astype("int8").to_numpy()
 
 
+def compute_tto_matchup(pitches: pd.DataFrame) -> np.ndarray:
+    """Pitcher × batter times-through-order — ADR-013 Decision 2.
+
+    "How many times has THIS pitcher faced THIS batter THIS game" — 1, 2, 3,
+    4+ → 1..4; PAD=0 only when the grouping keys are missing on a row.
+    Computed per (``game_pk``, ``pitcher``, ``batter``) by counting unique
+    ``at_bat_number`` values within the group, in encounter order.
+
+    Distinct from :func:`compute_tto_bucket`, which groups by
+    ``(game_pk, batter)`` only (PA index for the batter, agnostic of
+    pitcher). With same-pitcher-same-batter re-faces (most common matchups
+    in a game), both quantities coincide; they diverge whenever the pitcher
+    changes mid-game — exactly the case ADR-013 wants to encode separately.
+
+    Returns int8 array same length as ``pitches`` (model embedding expects
+    a vocab of 5: PAD=0, 1, 2, 3, 4+).
+    """
+    required = {"game_pk", "at_bat_number", "pitcher", "batter"}
+    if not required.issubset(pitches.columns):
+        raise KeyError(f"compute_tto_matchup needs {sorted(required)}")
+    ab_starts = (
+        pitches[["game_pk", "at_bat_number", "pitcher", "batter"]]
+        .drop_duplicates(["game_pk", "at_bat_number"])
+        .sort_values(["game_pk", "at_bat_number"])
+        .reset_index(drop=True)
+    )
+    ab_starts["pa_idx_in_matchup"] = (
+        ab_starts.groupby(["game_pk", "pitcher", "batter"]).cumcount() + 1
+    )
+    ab_starts["tto_matchup"] = ab_starts["pa_idx_in_matchup"].clip(1, 4).astype("int8")
+    merged = pitches.merge(
+        ab_starts[["game_pk", "at_bat_number", "tto_matchup"]],
+        on=["game_pk", "at_bat_number"],
+        how="left",
+    )
+    return merged["tto_matchup"].fillna(0).astype("int8").to_numpy()
+
+
 def compute_pitcher_fatigue(pitches: pd.DataFrame) -> pd.Series:
     """Cumulative pitch count for (game_pk, pitcher) BEFORE the current pitch.
 

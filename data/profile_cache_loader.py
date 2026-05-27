@@ -49,6 +49,8 @@ import pandas as pd
 from data.profile_cache import (
     BATTER_FEATURE_INDEX,
     BATTER_VECTOR_LEN,
+    MATCHUP_SCHEMA_VERSION,
+    MATCHUP_VECTOR_LEN,
     PITCHER_FEATURE_INDEX,
     PITCHER_VECTOR_LEN,
     PROFILE_SCHEMA_VERSION,
@@ -207,4 +209,111 @@ class ProfileCache:
             f"ProfileCache(role={self.role!r}, fold_id={self.fold_id}, "
             f"n_player_entries={len(self._player_lookup):,}, "
             f"n_league_entries={len(self._league_lookup):,})"
+        )
+
+
+class MatchupCache:
+    """Loaded per-fold pitcher×batter matchup cache (ADR-013 Decision 2 / ADR-014).
+
+    Parallel to :class:`ProfileCache` but keyed by ``(pitcher_id, batter_id,
+    asof_date, asof_game_num)``. The matchup cache encodes the pair's
+    cross-game history at the start of the asof game; same-game ABs are
+    already excluded by the builder's ``before_asof`` rule (separate
+    pitcher×batter TTO scalar carries the within-game adjustment signal).
+
+    No league-mean fallback here — a "league mean matchup" doesn't have a
+    well-defined meaning (the natural fallback for a pair with no prior
+    history *is* the zero/NaN vector that
+    :func:`data.profile_cache.build_matchup_profile_vector` produces for
+    empty matchups, with ``matchup_confidence=0``). NaN slots are filled
+    with 0 at lookup time so the model receives purely numeric input;
+    sparse-data slots remain distinguishable via the count features
+    (``n_pas``, ``matchup_confidence``).
+    """
+
+    def __init__(
+        self,
+        fold_id: int,
+        profiles_dir: Path | None = None,
+    ):
+        self.fold_id = int(fold_id)
+        self._profiles_dir = Path(profiles_dir) if profiles_dir else DEFAULT_PROFILES_DIR
+        self._vector_len = MATCHUP_VECTOR_LEN
+        self._lookup_dict: dict[tuple[int, int, pd.Timestamp, int], np.ndarray] = {}
+        self._load()
+
+    def _load(self) -> None:
+        path = self._profiles_dir / f"matchup_fold_{self.fold_id}.parquet"
+        if not path.exists():
+            raise FileNotFoundError(
+                f"matchup cache missing at {path}; run "
+                f"`python -m scripts.build_matchup_cache` first"
+            )
+        df = pd.read_parquet(path)
+        if not df.empty:
+            versions = df["schema_version"].unique()
+            if len(versions) != 1:
+                raise RuntimeError(
+                    f"{path} mixes schema versions {versions.tolist()}; rebuild"
+                )
+            if int(versions[0]) != MATCHUP_SCHEMA_VERSION:
+                raise RuntimeError(
+                    f"{path} has schema_version {versions[0]}; loader expects "
+                    f"{MATCHUP_SCHEMA_VERSION}. Rebuild via "
+                    f"`python -m scripts.build_matchup_cache`."
+                )
+            sample = np.asarray(df["vector"].iloc[0])
+            if len(sample) != self._vector_len:
+                raise RuntimeError(
+                    f"{path} vector length {len(sample)} != expected {self._vector_len}"
+                )
+        for _, row in df.iterrows():
+            key = (
+                int(row["pitcher_id"]),
+                int(row["batter_id"]),
+                pd.Timestamp(row["asof_date"]),
+                int(row["asof_game_num"]),
+            )
+            self._lookup_dict[key] = np.asarray(row["vector"], dtype=np.float32)
+
+    def lookup(
+        self,
+        pitcher_id: int,
+        batter_id: int,
+        asof_date: pd.Timestamp | str,
+        asof_game_num: int,
+    ) -> dict:
+        """Return the matchup vector for this (pitcher, batter, asof) key.
+
+        Two-step fallback:
+
+        1. **Pair has prior history.** Return the stored vector with NaN
+           slots filled with 0 (consistent with :class:`ProfileCache`).
+        2. **Pair has no prior history** (first time these two have faced
+           each other in the corpus, or pair fell into the held-out fold).
+           Zero vector; ``matchup_confidence`` will be 0 in that slot, so
+           the model can distinguish "no history" from "actual zero mix."
+        """
+        key = (
+            int(pitcher_id),
+            int(batter_id),
+            pd.Timestamp(asof_date),
+            int(asof_game_num),
+        )
+        vec = self._lookup_dict.get(key)
+        if vec is None:
+            return {
+                "vector": np.zeros(self._vector_len, dtype=np.float32),
+                "source": "zero_fallback",
+            }
+        vec = np.nan_to_num(vec, nan=0.0).astype(np.float32)
+        return {"vector": vec, "source": "per_pair"}
+
+    def __len__(self) -> int:
+        return len(self._lookup_dict)
+
+    def __repr__(self) -> str:
+        return (
+            f"MatchupCache(fold_id={self.fold_id}, "
+            f"n_pair_entries={len(self._lookup_dict):,})"
         )
