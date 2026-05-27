@@ -204,6 +204,17 @@ class ContextTokens(nn.Module):
         self.temp_emb = nn.Embedding(config.n_temp_buckets, d)
         self.roof_emb = nn.Embedding(config.n_roof, d)
 
+        # ADR-013 Decision 2 — cross-AB context. Gated so pre-v7p2 checkpoints
+        # (cross_ab_context=False) reload unchanged: no extra parameters
+        # constructed unless the flag is on.
+        if getattr(config, "cross_ab_context", False):
+            self.tto_matchup_emb = nn.Embedding(config.n_tto_matchup_buckets, d)
+            self.matchup_mlp = nn.Sequential(
+                nn.Linear(config.matchup_profile_dim, 4 * d),
+                nn.GELU(),
+                nn.Linear(4 * d, d),
+            )
+
         # Per-context-token LayerNorm
         self.pitcher_ln = nn.LayerNorm(d)
         self.batter_ln = nn.LayerNorm(d)
@@ -228,14 +239,29 @@ class ContextTokens(nn.Module):
             if isinstance(m, nn.Linear):
                 nn.init.normal_(m.weight, mean=0.0, std=std)
                 nn.init.zeros_(m.bias)
+        # ADR-013 D2 — only if the matchup pieces were constructed
+        if getattr(self.config, "cross_ab_context", False):
+            nn.init.normal_(self.tto_matchup_emb.weight, mean=0.0, std=std)
+            for m in self.matchup_mlp.modules():
+                if isinstance(m, nn.Linear):
+                    nn.init.normal_(m.weight, mean=0.0, std=std)
+                    nn.init.zeros_(m.bias)
 
     def forward(
         self,
         pitcher_profile: torch.Tensor,    # (B, pitcher_profile_dim)
         batter_profile: torch.Tensor,     # (B, batter_profile_dim)
         categorical: dict[str, torch.Tensor],  # each (B,) LongTensor
+        matchup_profile: torch.Tensor | None = None,   # (B, matchup_profile_dim) or None
     ) -> torch.Tensor:
-        """Build the three context tokens. Output shape (B, 3, d_model)."""
+        """Build the three context tokens. Output shape (B, 3, d_model).
+
+        When ``config.cross_ab_context`` is True, ``matchup_profile`` (the 21-dim
+        pitcher×batter history vector) must be provided and is summed into the
+        categorical context token alongside the ``tto_matchup`` embedding (read
+        from ``categorical["tto_matchup"]``). When False, both extras are
+        ignored — checkpoints predating ADR-013 D2 load unchanged.
+        """
         pitcher_tok = self.pitcher_ln(self.pitcher_mlp(pitcher_profile))
         batter_tok = self.batter_ln(self.batter_mlp(batter_profile))
 
@@ -253,6 +279,25 @@ class ContextTokens(nn.Module):
             + self.temp_emb(categorical["temp"])
             + self.roof_emb(categorical["roof"])
         )
+
+        if getattr(self.config, "cross_ab_context", False):
+            if matchup_profile is None:
+                raise ValueError(
+                    "cross_ab_context=True but matchup_profile is None — "
+                    "the dataset must provide a (B, matchup_profile_dim) tensor "
+                    "(see MatchupCache.lookup)."
+                )
+            if "tto_matchup" not in categorical:
+                raise KeyError(
+                    "cross_ab_context=True but categorical['tto_matchup'] missing — "
+                    "the dataset must compute tto_matchup_bucket on-load."
+                )
+            cat_sum = (
+                cat_sum
+                + self.tto_matchup_emb(categorical["tto_matchup"])
+                + self.matchup_mlp(matchup_profile)
+            )
+
         cat_tok = self.categorical_ln(cat_sum)
 
         # (B, 3, d_model)

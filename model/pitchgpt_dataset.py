@@ -39,7 +39,14 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
+from typing import Callable
+
 from data.dataset import PAD_ID, PITCH_TYPES, ProfileLookup, temporal_split_mask
+
+# ADR-013 Decision 2: matchup lookup is keyed on (pitcher_id, batter_id,
+# asof_date, asof_game_num) rather than a single player. ``MatchupCache.lookup``
+# (in data.profile_cache_loader) satisfies this signature.
+MatchupLookup = Callable[[int, int, pd.Timestamp, int], dict[str, np.ndarray]]
 from data.profile_cache import PITCHER_FEATURE_INDEX
 
 DEFAULT_PROFILE_STD_PATH = Path("data/preprocess_artifacts/v1/profile_standardization.npz")
@@ -128,6 +135,18 @@ CATEGORICAL_CTX_COLS = {
     "roof": "roof_state",
 }
 
+# Extra categorical context introduced by ADR-013 Decision 2 (cross-AB context).
+# Kept separate so that:
+#   - the augmented-parquet schema check (REQUIRED_AUG_COLS) doesn't fail on
+#     pre-v7p2 parquets that don't have ``tto_matchup_bucket``,
+#   - the dataset only reads this column when a ``matchup_profile_lookup`` is
+#     provided (i.e., cross-AB mode is explicitly enabled).
+# ``load_augmented_pitches`` derives ``tto_matchup_bucket`` on-load from
+# (game_pk, pitcher, batter, at_bat_number) — no re-augmentation needed.
+CATEGORICAL_CTX_COLS_CROSS_AB = {
+    "tto_matchup": "tto_matchup_bucket",
+}
+
 REQUIRED_AUG_COLS = (
     {"game_pk", "at_bat_number", "pitch_number", "game_date",
      "pitcher", "batter",
@@ -212,6 +231,7 @@ class PitchGPTAtBatDataset(Dataset):
         pitcher_profile_lookup: ProfileLookup,
         batter_profile_lookup: ProfileLookup,
         profile_standardizer: Optional[ProfileStandardizer] = None,
+        matchup_profile_lookup: Optional[MatchupLookup] = None,
     ):
         missing = REQUIRED_AUG_COLS - set(pitches.columns)
         if missing:
@@ -219,6 +239,23 @@ class PitchGPTAtBatDataset(Dataset):
                 f"PitchGPTAtBatDataset missing augmented columns: {sorted(missing)}; "
                 f"did you run `data/preprocess_pitchgpt.py apply`?"
             )
+
+        # Cross-AB mode (ADR-013 Decision 2): when a matchup lookup is provided,
+        # the dataset also emits ``matchup_profile`` per item and ``tto_matchup``
+        # in ``categorical_context``. The on-load helper
+        # :func:`load_augmented_pitches` derives ``tto_matchup_bucket`` from
+        # existing columns; verify it landed before we promise to read it.
+        self._matchup_lookup = matchup_profile_lookup
+        if self._matchup_lookup is not None:
+            need = set(CATEGORICAL_CTX_COLS_CROSS_AB.values())
+            cross_ab_missing = need - set(pitches.columns)
+            if cross_ab_missing:
+                raise KeyError(
+                    f"matchup_profile_lookup provided but augmented df missing "
+                    f"{sorted(cross_ab_missing)}; load via "
+                    f"`load_augmented_pitches` or call "
+                    f"`data.preprocess_pitchgpt.compute_tto_matchup` on the df first."
+                )
 
         self._df = (
             pitches.sort_values(["game_pk", "at_bat_number", "pitch_number"])
@@ -282,6 +319,14 @@ class PitchGPTAtBatDataset(Dataset):
             categorical_context[model_key] = torch.as_tensor(
                 int(first[col]), dtype=torch.long
             )
+        # ADR-013 Decision 2: cross-AB categoricals (tto_matchup) only when a
+        # matchup lookup is wired. Keeps the dict shape pre-v7p2-compatible
+        # when cross_ab_context is off.
+        if self._matchup_lookup is not None:
+            for model_key, col in CATEGORICAL_CTX_COLS_CROSS_AB.items():
+                categorical_context[model_key] = torch.as_tensor(
+                    int(first[col]), dtype=torch.long
+                )
 
         # Intended actions (teacher-forced at training time = actual factors).
         intended_actions = {
@@ -315,7 +360,7 @@ class PitchGPTAtBatDataset(Dataset):
             classify_ab_outcome(last.get("events")), dtype=torch.long
         )
 
-        return {
+        out = {
             "pitcher_profile": torch.as_tensor(pitcher_profile, dtype=torch.float32),
             "batter_profile": torch.as_tensor(batter_profile, dtype=torch.float32),
             "arsenal": torch.as_tensor(arsenal_feature, dtype=torch.float32),
@@ -329,6 +374,17 @@ class PitchGPTAtBatDataset(Dataset):
             },
             "padding_mask": torch.ones(T, dtype=torch.bool),
         }
+        # ADR-013 Decision 2 — emit the pitcher×batter matchup vector when
+        # cross-AB mode is enabled. The collate stacks it into (B, matchup_dim).
+        if self._matchup_lookup is not None:
+            matchup_vec = self._matchup_lookup(
+                int(first["pitcher"]),
+                int(first["batter"]),
+                asof_date,
+                asof_game_num,
+            )["vector"]
+            out["matchup_profile"] = torch.as_tensor(matchup_vec, dtype=torch.float32)
+        return out
 
 
 # ============================================================
@@ -423,7 +479,7 @@ def collate_pitchgpt_at_bats(batch: list[dict]) -> dict:
     for i, b in enumerate(batch):
         padding_mask[i, : len(b["padding_mask"])] = True
 
-    return {
+    out = {
         "pitcher_profile": pitcher_profile,
         "batter_profile": batter_profile,
         "arsenal": arsenal,
@@ -437,6 +493,11 @@ def collate_pitchgpt_at_bats(batch: list[dict]) -> dict:
         },
         "padding_mask": padding_mask,
     }
+    # ADR-013 Decision 2 — when items carry matchup_profile (cross-AB mode),
+    # stack them. Absence is back-compat default.
+    if "matchup_profile" in batch[0]:
+        out["matchup_profile"] = torch.stack([b["matchup_profile"] for b in batch])
+    return out
 
 
 # ============================================================
@@ -454,6 +515,15 @@ def load_augmented_pitches(
         augmented_dir: root directory of augmented parquets
             (``data/augmented`` by default).
         years: optional list of years to include; if None, loads all.
+
+    Side effect: derives ``tto_matchup_bucket`` (ADR-013 Decision 2) on-load
+    via :func:`data.preprocess_pitchgpt.compute_tto_matchup`. It's a fast
+    groupby cumcount on existing columns; doing it here avoids re-augmenting
+    every parquet (the column is deterministic from ``game_pk``,
+    ``at_bat_number``, ``pitcher``, ``batter``, all already present). The
+    dataset only consumes this column when ``matchup_profile_lookup`` is
+    wired, but precomputing it unconditionally keeps the loader idempotent
+    and lets older callers ignore it.
     """
     parts = []
     if not augmented_dir.exists():
@@ -472,7 +542,14 @@ def load_augmented_pitches(
         raise RuntimeError(
             f"no augmented parquets found under {augmented_dir} for years={years}"
         )
-    return pd.concat(parts, ignore_index=True)
+    df = pd.concat(parts, ignore_index=True)
+    # ADR-013 D2 — derive tto_matchup_bucket on-load (deterministic, cheap)
+    if "tto_matchup_bucket" not in df.columns:
+        need = {"game_pk", "at_bat_number", "pitcher", "batter"}
+        if need.issubset(df.columns):
+            from data.preprocess_pitchgpt import compute_tto_matchup
+            df["tto_matchup_bucket"] = compute_tto_matchup(df)
+    return df
 
 
 def split_augmented(pitches: pd.DataFrame) -> dict[str, pd.DataFrame]:

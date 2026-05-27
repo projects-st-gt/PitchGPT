@@ -201,6 +201,7 @@ class PitchGPT(nn.Module):
         intended_actions: dict[str, torch.Tensor],  # for result head, (B, T)
         padding_mask: torch.Tensor | None = None,  # (B, T) True=real, False=pad
         arsenal: torch.Tensor | None = None,  # (B, n_arsenal_dims) — required if config.arsenal_per_pitch
+        matchup_profile: torch.Tensor | None = None,  # (B, matchup_profile_dim) — required if config.cross_ab_context
         return_intermediates: bool = False,
     ) -> dict[str, torch.Tensor]:
         """Forward pass. Returns logits for all heads.
@@ -224,8 +225,14 @@ class PitchGPT(nn.Module):
         positions of the output sequences correspond to context tokens;
         callers should slice off these when computing per-pitch losses.
         """
-        # 1. Build context tokens (B, 3, d_model)
-        ctx_tokens = self.context(pitcher_profile, batter_profile, categorical_context)
+        # 1. Build context tokens (B, 3, d_model). When ``config.cross_ab_context``
+        # is on, ``matchup_profile`` must be supplied and is summed (along with
+        # the ``tto_matchup`` embedding from ``categorical_context``) into the
+        # categorical token by :class:`ContextTokens`.
+        ctx_tokens = self.context(
+            pitcher_profile, batter_profile, categorical_context,
+            matchup_profile=matchup_profile,
+        )
 
         # 2. Build pitch tokens (B, T, d_model)
         pitch_tokens = self.embed(pitch_factors)

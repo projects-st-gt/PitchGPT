@@ -84,6 +84,7 @@ def train_remote(
     type_focal_gamma: float = 0.0,     # focal loss on type head
     type_class_weight_alpha: float = 0.0,  # inverse-freq class weighting
     type_conditioned_heads: bool = False,  # ADR 013
+    cross_ab_context: bool = False,  # ADR-013 D2
 ) -> dict:
     """Remote A100 training. Reads data from the mounted Volume, writes
     checkpoints back to the Volume. Returns the local-training summary dict.
@@ -116,6 +117,7 @@ def train_remote(
         type_focal_gamma=type_focal_gamma,
         type_class_weight_alpha=type_class_weight_alpha,
         type_conditioned_heads=type_conditioned_heads,
+        cross_ab_context=cross_ab_context,
     )
 
     # Make sure files we wrote to the Volume are flushed for the next call /
@@ -163,6 +165,7 @@ def main(
     type_focal_gamma: float = 0.0,     # focal loss on type head (0 = CE)
     type_class_weight_alpha: float = 0.0,  # inverse-freq class weighting
     type_conditioned_heads: bool = False,  # ADR 013
+    cross_ab_context: bool = False,  # ADR-013 D2
 ):
     """Convenience entrypoint for `modal run modal_app.py`."""
     summary = train_remote.remote(
@@ -183,6 +186,7 @@ def main(
         type_focal_gamma=type_focal_gamma,
         type_class_weight_alpha=type_class_weight_alpha,
         type_conditioned_heads=type_conditioned_heads,
+        cross_ab_context=cross_ab_context,
     )
     print("\nRemote training complete:")
     import json

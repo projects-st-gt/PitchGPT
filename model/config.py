@@ -107,6 +107,21 @@ class PitchGPTConfig:
     # Default OFF so pre-v7 checkpoints reload unchanged.
     type_conditioned_heads: bool = False
 
+    # Cross-AB context (ADR-013 Decision 2). When True, two extra signals reach
+    # the categorical context token:
+    #   1. a 21-dim pitcher×batter matchup vector (from MatchupCache; covers
+    #      cross-game history — pitch mix used vs this batter, whiff-on-swing
+    #      by type, last-face xwOBA, etc.) projected by a small MLP to d_model.
+    #   2. a pitcher×batter times-through-order embedding (vocab 5: PAD/1/2/3/4+,
+    #      counted per (game_pk, pitcher, batter) — distinct from the existing
+    #      batter-only ``tto``, which is agnostic of pitching changes).
+    # Both are summed into the existing categorical context token (lowest-
+    # ripple wiring; no new context token, no change to pitcher_profile_dim).
+    # Default OFF so pre-v7p2 checkpoints reload unchanged.
+    cross_ab_context: bool = False
+    matchup_profile_dim: int = 21  # MATCHUP_VECTOR_LEN — kept in sync via test
+    n_tto_matchup_buckets: int = 5  # PAD=0, 1, 2, 3, 4+
+
     # Concat-then-project per-pitch factor embeddings (ADR 011, "fix #1").
     # Default: the 11 per-pitch factor embeddings are *summed* into one
     # d_model token, forcing the trunk to disentangle the sum. When True:

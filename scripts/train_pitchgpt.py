@@ -303,6 +303,7 @@ def evaluate(
             intended_actions=batch["intended_actions"],
             padding_mask=batch["padding_mask"],
             arsenal=batch.get("arsenal"),
+            matchup_profile=batch.get("matchup_profile"),
         )
         _, log = compute_losses(out, batch, cfg, n_context_tokens=PitchGPT.N_CONTEXT_TOKENS, zone_centers=zone_centers)
         for k in head_losses_sum:
@@ -401,6 +402,7 @@ def train(
     type_focal_gamma: float = 0.0,     # focal loss on type head (0 = CE)
     type_class_weight_alpha: float = 0.0,  # inverse-freq class weighting (0 = uniform)
     type_conditioned_heads: bool = False,  # ADR 013 — type-condition the execution/result heads
+    cross_ab_context: bool = False,  # ADR-013 D2 — matchup vector + pitcher×batter TTO
 ) -> dict:
     """Run a single training pass; return summary dict.
 
@@ -418,6 +420,7 @@ def train(
     cfg.type_focal_gamma = type_focal_gamma
     cfg.type_class_weight_alpha = type_class_weight_alpha
     cfg.type_conditioned_heads = type_conditioned_heads  # ADR 013
+    cfg.cross_ab_context = cross_ab_context  # ADR-013 D2
     run_name = run_name or f"{size}-fold{fold_id}-{int(time.time())}"
     run_dir = ckpt_dir / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -453,6 +456,20 @@ def train(
     pc_p = ProfileCache(role="pitcher", fold_id=fold_id, profiles_dir=profiles_dir)
     pc_b = ProfileCache(role="batter", fold_id=fold_id, profiles_dir=profiles_dir)
 
+    # ADR-013 D2 — instantiate the matchup cache when cross_ab_context is on.
+    # Failing here (cache missing) is preferable to silently training without it.
+    matchup_cache = None
+    matchup_lookup = None
+    if cross_ab_context:
+        from data.profile_cache_loader import MatchupCache
+        matchup_cache = MatchupCache(fold_id=fold_id, profiles_dir=profiles_dir)
+        matchup_lookup = matchup_cache.lookup
+        log_event({
+            "event": "matchup_cache_loaded",
+            "fold_id": fold_id,
+            "n_pair_entries": len(matchup_cache),
+        })
+
     standardizer = None
     if standardize_profiles:
         # The profile path may be relative to a different cwd on Modal; resolve
@@ -468,12 +485,14 @@ def train(
         pitcher_profile_lookup=pc_p.lookup,
         batter_profile_lookup=pc_b.lookup,
         profile_standardizer=standardizer,
+        matchup_profile_lookup=matchup_lookup,
     )
     val_ds = PitchGPTAtBatDataset(
         pitches=val_pitches,
         pitcher_profile_lookup=pc_p.lookup,
         batter_profile_lookup=pc_b.lookup,
         profile_standardizer=standardizer,
+        matchup_profile_lookup=matchup_lookup,
     ) if len(val_pitches) else None
 
     train_loader = DataLoader(
@@ -586,6 +605,7 @@ def train(
                     intended_actions=batch["intended_actions"],
                     padding_mask=batch["padding_mask"],
                     arsenal=batch.get("arsenal"),
+                    matchup_profile=batch.get("matchup_profile"),
                 )
                 loss, per_head = compute_losses(
                     out, batch, cfg, n_context_tokens=PitchGPT.N_CONTEXT_TOKENS,
@@ -736,6 +756,8 @@ def main() -> None:
                    help="inverse-freq class weighting on type head (0 = uniform; 0.5 = mild; 1.0 = full balance)")
     p.add_argument("--type-conditioned-heads", action="store_true",
                    help="type-condition the execution/result heads via the type_fusion MLP (ADR 013)")
+    p.add_argument("--cross-ab-context", action="store_true",
+                   help="feed pitcher×batter matchup vector + matchup-TTO into context (ADR-013 D2)")
     args = p.parse_args()
 
     train(
@@ -764,6 +786,7 @@ def main() -> None:
         type_focal_gamma=args.type_focal_gamma,
         type_class_weight_alpha=args.type_class_weight_alpha,
         type_conditioned_heads=args.type_conditioned_heads,
+        cross_ab_context=args.cross_ab_context,
     )
 
 
