@@ -173,6 +173,45 @@ def test_natural_mode_empirical_distribution_matches_propensity(setup):
     )
 
 
+@requires_v7
+def test_intervention_type_propensity_exposed_matches_sampled(setup):
+    """``RolloutResult.intervention_type_propensity`` must equal the π̂(type|h)
+    the rollout actually sampled the intervention pitch from.
+
+    This is the field MCSim App B's matchup card reads for its trust gate, so
+    it must be the *same* distribution the rollout used — not a re-derived one.
+    Captures the type-sampling probs and compares to the returned field.
+    """
+    nuisance, ab, k = setup
+    captured = []
+    real_sample = gc._sample_from_probs
+
+    def capturing_sample(probs, rng, active=None):
+        result = real_sample(probs, rng, active)
+        captured.append(probs.numpy().copy())
+        return result
+
+    with patch.object(gc, "_sample_from_probs", side_effect=capturing_sample):
+        r = gc.g_compute(nuisance, ab, intervention_position=k,
+                         intervention_type=None, n_paths=200, rng_seed=7)
+
+    # First sampling call = type head at step==k; all paths share history → row 0.
+    pi_hat_sampled = captured[0][0]
+    assert r.intervention_type_propensity.shape == (N_PITCH_TYPES,)
+    np.testing.assert_allclose(
+        r.intervention_type_propensity, pi_hat_sampled, atol=1e-6,
+        err_msg="exposed intervention_type_propensity != the distribution the "
+                "rollout sampled the intervention pitch from",
+    )
+    # Named numerical output (per CLAUDE.md bug-prevention discipline): the
+    # modal type and its π̂, which the trust gate consumes.
+    modal = int(np.argmax(r.intervention_type_propensity))
+    print(f"\nπ̂(modal type id {modal + 1}) = "
+          f"{r.intervention_type_propensity[modal]:.3f}  "
+          f"(full π̂ = {np.round(r.intervention_type_propensity, 3)})")
+    assert np.isclose(r.intervention_type_propensity.sum(), 1.0, atol=1e-5)
+
+
 # ============================================================
 # k=0 — first-pitch rollout (MCSim App B Option C)
 # ============================================================

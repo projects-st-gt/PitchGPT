@@ -233,6 +233,15 @@ class RolloutResult:
     n_truncated: int                     # paths that didn't terminate within max_steps
     intervention_velo_bin_mean: float    # mean sampled velo bin at the intervention
                                          # step across still-active paths (NaN if none)
+    intervention_type_propensity: np.ndarray  # π̂(type | h) at the intervention step,
+                                         # shape (7,) over PITCH_TYPES (1-indexed
+                                         # type_id − TYPE_ID_OFFSET). This is the exact
+                                         # distribution the rollout sampled the
+                                         # intervention pitch from — at k=0 every path
+                                         # shares the pre-intervention context, so it is
+                                         # a single well-defined propensity vector. Used
+                                         # by MCSim App B's matchup-card trust gate
+                                         # (predictive, not causal — see brainstorm doc).
 
     @property
     def ab_length_distribution(self) -> dict[int, int]:
@@ -363,6 +372,8 @@ def g_compute(
 
     # Captured at the intervention step (see below).
     intervention_velo_bin_mean: float = float("nan")
+    # π̂(type | h) at the intervention step, shape (7,). Captured at step == k.
+    intervention_type_propensity: np.ndarray = np.full(N_PITCH_TYPES, np.nan)
 
     # --- Build batch + extract observed initial sequence -----------------------
     # build_single_ab_batch sets up the FULL observed AB replicated N times.
@@ -490,6 +501,21 @@ def g_compute(
             MODEL_PITCH_TYPES_START_IDX:MODEL_PITCH_TYPES_END_IDX,
         ]
         type_probs = type_probs / type_probs.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+
+        # Capture the natural type propensity π̂(type | h) at the intervention
+        # step. At step == k every path shares the identical pre-intervention
+        # history (positions 0..k-1 are the observed AB replicated N times), so
+        # all rows of ``type_probs`` are equal here — averaging over active
+        # paths yields the single propensity vector. This is the distribution
+        # the intervention pitch is sampled from in natural mode, and the gate
+        # input for MCSim App B's matchup-card trust flag.
+        if step == k:
+            if active.any():
+                intervention_type_propensity = (
+                    type_probs.numpy()[active].mean(axis=0).astype(np.float64)
+                )
+            else:
+                intervention_type_propensity = np.full(N_PITCH_TYPES, np.nan)
 
         # Sample type. At the intervention position (``step == k``):
         #   - If an intervention type was specified, clamp every path to it.
@@ -697,4 +723,5 @@ def g_compute(
         ab_outcome_distribution=outcome_dist,
         n_truncated=n_truncated,
         intervention_velo_bin_mean=intervention_velo_bin_mean,
+        intervention_type_propensity=intervention_type_propensity,
     )
