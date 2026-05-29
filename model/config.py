@@ -122,6 +122,25 @@ class PitchGPTConfig:
     matchup_profile_dim: int = 21  # MATCHUP_VECTOR_LEN — kept in sync via test
     n_tto_matchup_buckets: int = 5  # PAD=0, 1, 2, 3, 4+
 
+    # Arsenal-masked type logits. Hard-constrains the type head's softmax to
+    # the pitcher's actual repertoire: logits for any pitch type with
+    # ``has_pitch=0`` (zero pitches of this type in the trailing arsenal
+    # window) get pushed to ``-1e9`` so the softmax leaks zero mass to
+    # physically impossible events. Free calibration win — a pitcher with no
+    # splitter cannot have π̂(FS) > 0 — and structurally informs positivity
+    # gating in the causal layer.
+    # The mask is a pure post-process on the type logits in
+    # :meth:`PitchGPT.forward`, applied after the two-stage and
+    # type-conditioned-heads paths. It can therefore be enabled at
+    # **inference time on an existing checkpoint** (set the flag on the
+    # loaded config) for a calibration/eval delta without retraining.
+    # Fallback: pitchers with all-zero has_pitch (zero-history / debutants
+    # via the zero-fallback profile path) bypass the mask — masking would
+    # produce an entirely-masked softmax (NaN).
+    # Default OFF for back-compat; flip on for new runs and for masked-
+    # inference evals.
+    arsenal_mask_type_logits: bool = False
+
     # Concat-then-project per-pitch factor embeddings (ADR 011, "fix #1").
     # Default: the 11 per-pitch factor embeddings are *summed* into one
     # d_model token, forcing the trunk to disentangle the sum. When True:

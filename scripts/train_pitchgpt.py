@@ -403,6 +403,7 @@ def train(
     type_class_weight_alpha: float = 0.0,  # inverse-freq class weighting (0 = uniform)
     type_conditioned_heads: bool = False,  # ADR 013 — type-condition the execution/result heads
     cross_ab_context: bool = False,  # ADR-013 D2 — matchup vector + pitcher×batter TTO
+    arsenal_mask_type_logits: bool = False,  # hard-mask impossible-type logits
 ) -> dict:
     """Run a single training pass; return summary dict.
 
@@ -421,6 +422,7 @@ def train(
     cfg.type_class_weight_alpha = type_class_weight_alpha
     cfg.type_conditioned_heads = type_conditioned_heads  # ADR 013
     cfg.cross_ab_context = cross_ab_context  # ADR-013 D2
+    cfg.arsenal_mask_type_logits = arsenal_mask_type_logits
     run_name = run_name or f"{size}-fold{fold_id}-{int(time.time())}"
     run_dir = ckpt_dir / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -758,6 +760,8 @@ def main() -> None:
                    help="type-condition the execution/result heads via the type_fusion MLP (ADR 013)")
     p.add_argument("--cross-ab-context", action="store_true",
                    help="feed pitcher×batter matchup vector + matchup-TTO into context (ADR-013 D2)")
+    p.add_argument("--arsenal-mask-type-logits", action="store_true",
+                   help="hard-mask type logits where has_pitch=0 (free calibration win; safe for inference-only use on existing checkpoints)")
     args = p.parse_args()
 
     train(
@@ -787,6 +791,7 @@ def main() -> None:
         type_class_weight_alpha=args.type_class_weight_alpha,
         type_conditioned_heads=args.type_conditioned_heads,
         cross_ab_context=args.cross_ab_context,
+        arsenal_mask_type_logits=args.arsenal_mask_type_logits,
     )
 
 

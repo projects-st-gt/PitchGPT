@@ -352,6 +352,8 @@ class PitchGPT(nn.Module):
         # 6b. Optional two-stage propensity TYPE head — overrides the type
         # logits at pitch positions with an MLP that reads (hidden, type_emb,
         # zone_emb, result_emb) of pitch t.
+        # (Note: the arsenal mask in 6c. below runs *after* this override
+        # so both the weight-tied and two-stage type paths land masked.)
         if self.config.propensity_type_two_stage:
             pitch_hidden_for_prop = x[:, self.N_CONTEXT_TOKENS:, :]  # (B, T, d)
             type_e = self.embed.type_emb(pitch_factors["type"])
@@ -369,6 +371,52 @@ class PitchGPT(nn.Module):
             type_full[:, self.N_CONTEXT_TOKENS:, :] = type_logits_two_stage
             propensity_logits_full["type"] = type_full
             propensity_logits = propensity_logits_full
+
+        # 6c. Arsenal-masked type logits. For pitchers with has_pitch[k]=0
+        # (no pitches of type k in the trailing arsenal window), force the
+        # corresponding type logit to a very negative value so the softmax
+        # leaks zero mass to physically impossible events. Operates on the
+        # *final* type logits (post-two-stage, post-type-conditioning) so
+        # both code paths land masked. Inference-time-friendly: an existing
+        # checkpoint can opt into this by setting the flag on its config.
+        # Convention discipline: ``arsenal`` is ``(B, N_ARSENAL_DIMS=14)`` —
+        # ``[7 rates, 7 has_pitch]`` per ``ARSENAL_FEATURE_IDX`` in
+        # ``model/pitchgpt_dataset.py``. has_pitch[i] aligns with model type
+        # ID ``MODEL_PITCH_TYPES_START_IDX + i`` (i.e., 1..7); PAD (index 0)
+        # is left untouched (padded positions are loss-ignored).
+        if getattr(self.config, "arsenal_mask_type_logits", False):
+            if arsenal is None:
+                raise ValueError(
+                    "arsenal_mask_type_logits=True but no `arsenal` tensor was "
+                    "passed; the mask reads has_pitch from arsenal[:, 7:14]."
+                )
+            from data.dataset import (
+                MODEL_PITCH_TYPES_START_IDX,
+                MODEL_PITCH_TYPES_END_IDX,
+            )
+            n_real = MODEL_PITCH_TYPES_END_IDX - MODEL_PITCH_TYPES_START_IDX
+            has_pitch = arsenal[:, n_real:]  # (B, 7)
+            # Fallback: rows with no observed arsenal (debutants on a
+            # zero-fallback profile lookup) skip the mask — otherwise the
+            # softmax would have all logits at -1e9 → NaN.
+            any_pitch = has_pitch.sum(dim=-1, keepdim=True) > 0  # (B, 1) bool
+            B = arsenal.shape[0]
+            keep = torch.ones(
+                B, self.config.n_pitch_types,
+                dtype=arsenal.dtype, device=arsenal.device,
+            )
+            keep[:, MODEL_PITCH_TYPES_START_IDX:MODEL_PITCH_TYPES_END_IDX] = has_pitch
+            # Where any_pitch is False, restore the all-ones row (no mask).
+            keep = torch.where(any_pitch, keep, torch.ones_like(keep))
+            # Broadcast (B, 1, n_pitch_types) across the sequence dim.
+            keep_b1k = keep.unsqueeze(1)
+            type_logits = propensity_logits["type"]
+            type_logits = torch.where(
+                keep_b1k > 0.5,
+                type_logits,
+                torch.full_like(type_logits, -1e9),
+            )
+            propensity_logits = {**propensity_logits, "type": type_logits}
 
         # 7. Result head — shifted-hidden + intended action (per ADR 007 Amendment).
         #
