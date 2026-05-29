@@ -213,9 +213,9 @@ class RolloutResult:
 
     n_paths: int
     intervention_position: int
-    intervention_type: int
-    intervention_type_name: str
-    intervention_zone: Optional[int]   # 0..12 feature-zone (v5 SIS internal), or None for type-only
+    intervention_type: Optional[int]            # None when the rollout is natural (no intervention)
+    intervention_type_name: Optional[str]       # "FF", "SL", ... or None for natural rollouts
+    intervention_zone: Optional[int]            # 0..12 feature-zone (v5 SIS internal), or None for type-only
     max_steps: int
 
     # Per-path outputs, shape (N,)
@@ -247,8 +247,18 @@ class RolloutResult:
 # ============================================================
 
 
-def _resolve_intervention_type(intervention_type: int | str) -> tuple[int, str]:
-    """Returns (type_id_model_0indexed, type_name)."""
+def _resolve_intervention_type(
+    intervention_type: int | str | None,
+) -> tuple[Optional[int], Optional[str]]:
+    """Returns ``(type_id_model_0indexed, type_name)``.
+
+    ``intervention_type=None`` signals **natural mode** (ADR-013 / MCSim App B
+    D4): the rollout samples the pitch at the intervention position from
+    ``π̂(type | h)`` instead of clamping it. Both returns are ``None`` in
+    that case so downstream code can fall back to the sampling branch.
+    """
+    if intervention_type is None:
+        return None, None
     if isinstance(intervention_type, str):
         if intervention_type not in PITCH_TYPE_TO_ID:
             raise ValueError(
@@ -291,7 +301,7 @@ def g_compute(
     ab_pitches: pd.DataFrame,
     *,
     intervention_position: int,
-    intervention_type: int | str,
+    intervention_type: int | str | None = None,
     intervention_zone: Optional[int] = None,
     n_paths: int = 1000,
     max_steps: int = 12,
@@ -303,6 +313,13 @@ def g_compute(
     See the module docstring for the simulation rules. Outputs a
     :class:`RolloutResult` with per-path terminal steps + outcomes + run values
     and the aggregates a demo (or AIPW) would consume.
+
+    **Natural mode** (``intervention_type=None``, MCSim App B D4): instead of
+    clamping a specific pitch type at ``intervention_position``, sample the
+    type from ``π̂(type | history)`` per path. Downstream simulation rules
+    (count dynamics, result-head conditioning, AB termination) are unchanged.
+    Use this for matchup-card cells where the question is "what would this
+    pitcher naturally do?", not "what if he threw X?".
     """
     if intervention_position < 1:
         raise ValueError(
@@ -465,8 +482,11 @@ def g_compute(
         ]
         type_probs = type_probs / type_probs.sum(dim=-1, keepdim=True).clamp_min(1e-12)
 
-        # Sample type (with intervention clamp at step == k).
-        if step == k:
+        # Sample type. At the intervention position (``step == k``):
+        #   - If an intervention type was specified, clamp every path to it.
+        #   - Natural mode (intervention_type_id is None) — fall through to the
+        #     normal sampling branch, which draws from π̂(type | h) per path.
+        if step == k and intervention_type_id is not None:
             sampled_type = np.full(N, intervention_type_id, dtype=np.int64)
         else:
             sampled_type = _sample_from_probs(type_probs, rng, active)
