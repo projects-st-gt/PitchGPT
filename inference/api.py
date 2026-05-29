@@ -20,6 +20,7 @@ renders ``QueryResponse``.
 from __future__ import annotations
 
 import glob
+import math
 import time
 from pathlib import Path
 from typing import Optional
@@ -57,6 +58,7 @@ from inference.schemas import (
     ABContextResponse,
     AtBatListResponse,
     AtBatSummary,
+    CandidateRecommendation,
     CounterfactualResult,
     ExpectedDistribution,
     GameListResponse,
@@ -70,8 +72,11 @@ from inference.schemas import (
     PositionInfo,
     QueryRequest,
     QueryResponse,
+    RecommendRequest,
+    RecommendResponse,
     RefusalInfo,
 )
+from recommender import CandidateRanking, rank_pitch_types
 from inference.player_names import _NameCache, name_for_mlbam
 from data.profile_cache import (
     BATTER_FEATURE_INDEX,
@@ -876,4 +881,103 @@ def pitcher_profile(
         profile_confidence=slot("profile_confidence"),
         long_window_span_days=slot("long_window_span_days"),
         long_window_pct_current_season=slot("long_window_pct_current_season"),
+    )
+
+
+# ============================================================
+# POST /recommend — trust-region-restricted causal recommendation
+# ============================================================
+
+
+def _ranking_to_schema(r: CandidateRanking) -> CandidateRecommendation:
+    """Convert one ``CandidateRanking`` row to its Pydantic schema.
+
+    Refused candidates have NaN for rollout-derived fields in the dataclass;
+    the schema uses ``Optional[float]`` and we translate NaN → None so the
+    JSON response is clean (JSON has no NaN; serializing it produces a
+    library-dependent mess).
+    """
+    def _opt(v):  # NaN → None; floats / ints pass through
+        if v is None or isinstance(v, bool):
+            return v
+        if isinstance(v, float) and not math.isfinite(v):
+            return None
+        return v
+
+    return CandidateRecommendation(
+        pitch_type=r.pitch_type,
+        p_hat=r.p_hat,
+        trust_state=r.trust_state,
+        rationale=r.rationale,
+        rank=r.rank,
+        mean_run_value=_opt(r.mean_run_value),
+        se_run_value=_opt(r.se_run_value),
+        ci_lower=_opt(r.ci_lower),
+        ci_upper=_opt(r.ci_upper),
+        n_truncated=_opt(r.n_truncated),
+        effect_vs_observed=_opt(r.effect_vs_observed),
+        e_value_point=_opt(r.e_value_point),
+        e_value_ci_limit=_opt(r.e_value_ci_limit),
+        is_tossup=bool(r.is_tossup),
+        ab_outcome_dist=r.ab_outcome_dist,
+    )
+
+
+@app.post("/recommend", response_model=RecommendResponse)
+def recommend(req: RecommendRequest) -> RecommendResponse:
+    """Trust-region-restricted causal recommendation.
+
+    Given an AB and a position to intervene at, rank pitch-type candidates
+    by expected run value (lower = better for the pitcher), with the
+    positivity gate refusing candidates the data can't confidently support.
+
+    See ``docs/recommender_brainstorm.md`` for the design (D1–D6) and the
+    ``recommender.rank.rank_pitch_types`` docstring for the pipeline.
+    """
+    nuisance = AppState.get_nuisance()
+    df = AppState.get_val()
+    ab = df[
+        (df["game_pk"] == req.game_pk) & (df["at_bat_number"] == req.at_bat_number)
+    ].sort_values("pitch_number").reset_index(drop=True)
+    if len(ab) == 0:
+        raise HTTPException(
+            status_code=404,
+            detail=f"AB not found: game_pk={req.game_pk}, at_bat_number={req.at_bat_number}",
+        )
+    if req.intervention_position >= len(ab):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"intervention_position {req.intervention_position} ≥ AB length {len(ab)}; "
+                f"pick an earlier position (must be in [1, {len(ab)}))"
+            ),
+        )
+    if req.candidates is not None:
+        unknown = [c for c in req.candidates if c not in MODEL_TYPE_ID]
+        if unknown:
+            raise HTTPException(
+                status_code=400,
+                detail=f"unknown pitch types in `candidates`: {unknown}",
+            )
+
+    kwargs = {}
+    if req.tau_refuse is not None:
+        kwargs["tau_refuse"] = req.tau_refuse
+    if req.tau_green is not None:
+        kwargs["tau_green"] = req.tau_green
+
+    result = rank_pitch_types(
+        nuisance, ab,
+        intervention_position=req.intervention_position,
+        n_paths=req.n_paths,
+        candidates=req.candidates,
+        **kwargs,
+    )
+    return RecommendResponse(
+        ranked=[_ranking_to_schema(r) for r in result.ranked],
+        refused=[_ranking_to_schema(r) for r in result.refused],
+        intervention_position=result.intervention_position,
+        observed_type_at_position=result.observed_type_at_position,
+        n_paths=result.n_paths,
+        timing_seconds=result.timing_seconds,
     )
