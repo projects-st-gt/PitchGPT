@@ -171,3 +171,68 @@ def test_natural_mode_empirical_distribution_matches_propensity(setup):
     np.testing.assert_allclose(empirical, pi_hat, atol=0.03), (
         f"empirical type proportions {empirical} differ from π̂ {pi_hat} by more than 3%"
     )
+
+
+# ============================================================
+# k=0 — first-pitch rollout (MCSim App B Option C)
+# ============================================================
+
+
+@requires_v7
+def test_intervention_position_zero_natural_mode_runs(setup):
+    """k=0 + natural mode must run without error and produce a valid
+    RolloutResult — pitch 0 is sampled from the model's last-context-token
+    propensity output (no observed pitch history)."""
+    nuisance, ab, _ = setup
+    r = gc.g_compute(nuisance, ab, intervention_position=0,
+                     intervention_type=None, n_paths=50, rng_seed=42)
+    assert r.intervention_position == 0
+    assert r.intervention_type is None
+    assert np.isfinite(r.mean_run_value)
+    np.testing.assert_allclose(r.ab_outcome_distribution.sum(), 1.0, atol=1e-5)
+
+
+@requires_v7
+def test_intervention_position_zero_specific_type_runs(setup):
+    """k=0 + specific type (e.g. do(FF) on the first pitch) must also work."""
+    nuisance, ab, _ = setup
+    r = gc.g_compute(nuisance, ab, intervention_position=0,
+                     intervention_type="FF", n_paths=50, rng_seed=42)
+    assert r.intervention_position == 0
+    assert r.intervention_type_name == "FF"
+    assert np.isfinite(r.mean_run_value)
+
+
+@requires_v7
+def test_intervention_position_zero_first_pitch_propensity_matches_pi_hat(setup):
+    """The empirical distribution of first-pitch samples must match the
+    propensity at the last-context-token position. This is the pin for
+    Option C: the model produces sensible first-pitch propensities from
+    the context tokens alone, with no pitch history."""
+    nuisance, ab, _ = setup
+    captured = []
+    real_sample = gc._sample_from_probs
+
+    def capturing_sample(probs, rng, active=None):
+        result = real_sample(probs, rng, active)
+        captured.append((probs.numpy().copy(), result.copy()))
+        return result
+
+    with patch.object(gc, "_sample_from_probs", side_effect=capturing_sample):
+        gc.g_compute(nuisance, ab, intervention_position=0,
+                     intervention_type=None, n_paths=2000, rng_seed=42)
+
+    assert captured, "no sampling occurred — natural-mode branch not taken at k=0?"
+    probs_first, samples_first = captured[0]
+    assert probs_first.shape == (2000, N_PITCH_TYPES)
+    pi_hat_first_pitch = probs_first[0]
+    empirical = np.bincount(samples_first, minlength=N_PITCH_TYPES) / len(samples_first)
+    np.testing.assert_allclose(empirical, pi_hat_first_pitch, atol=0.03), (
+        f"first-pitch empirical {empirical} differs from π̂ {pi_hat_first_pitch} by >3%"
+    )
+    # Sanity: π̂ shouldn't be degenerate (uniform or one-hot) — the model
+    # should learn that pitchers strongly favor fastballs in 0-0 counts.
+    assert pi_hat_first_pitch.max() > 0.20, (
+        f"first-pitch propensity looks degenerate: max π̂ = {pi_hat_first_pitch.max():.3f}; "
+        f"a real pitcher's modal first-pitch type should be > 20% probability"
+    )

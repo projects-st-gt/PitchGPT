@@ -321,16 +321,25 @@ def g_compute(
     Use this for matchup-card cells where the question is "what would this
     pitcher naturally do?", not "what if he threw X?".
     """
-    if intervention_position < 1:
+    if intervention_position < 0:
         raise ValueError(
-            f"intervention_position must be ≥ 1 (the model doesn't autoregressively "
-            f"predict pitch[0] from no history). Got {intervention_position}."
+            f"intervention_position must be ≥ 0; got {intervention_position}."
         )
     if intervention_position >= len(ab_pitches):
         raise ValueError(
             f"intervention_position {intervention_position} ≥ AB length "
             f"{len(ab_pitches)}; pick an earlier position."
         )
+    # k=0 (intervene at first pitch / "fresh AB from 0-0") relies on the
+    # model's propensity at sequence index NC-1 — the last context-token
+    # position — for sampling pitch 0. That output is a function of the
+    # context tokens only (causal mask blocks attention from pitch positions
+    # to context tokens), so what's *at* pitch position 0 doesn't matter
+    # while we're sampling pitch 0. The caller still provides a 1-row
+    # ``ab_pitches`` DataFrame for the AB-level state lookups
+    # (count/runners/outs/pitcher_fatigue/spin_axis_fill at position k=0);
+    # the pitch-factor values at that row are overwritten by the sample.
+    # See MCSim App B brainstorm Decision D4 + Option C.
     if max_steps < intervention_position + 1:
         raise ValueError(
             f"max_steps {max_steps} must be > intervention_position {intervention_position}"
