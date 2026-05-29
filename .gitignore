@@ -38,3 +38,8 @@ frontend/*.tsbuildinfo
 .vscode/
 .idea/
 *.swp
+
+# MCSim local SQLite — predictions + actuals + model_versions. Single-file DB
+# bootstraps from mcsim.storage.init_db() on first call.
+data/mcsim.sqlite
+data/mcsim.sqlite-journal
