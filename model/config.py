@@ -97,6 +97,16 @@ class PitchGPTConfig:
     # meant to be combined with `propensity_type_two_stage`.
     propensity_situational: bool = False
 
+    # Type-conditioned execution heads (ADR-013 Decision 1). When True, the
+    # zone/velo/spin_rate/spin_axis propensity heads condition on the NEXT
+    # pitch's type: a fusion MLP combines the trunk hidden at position t with
+    # the embedding of type[t+1] (teacher-forced at training; the sampled or
+    # intervened type at rollout). The TYPE head is unchanged — it still reads
+    # the raw hidden, since type is not conditioned on itself. Fixes incoherent
+    # sampled pitches in g-computation rollouts (e.g. a curveball at 96 mph).
+    # Default OFF so pre-v7 checkpoints reload unchanged.
+    type_conditioned_heads: bool = False
+
     # Concat-then-project per-pitch factor embeddings (ADR 011, "fix #1").
     # Default: the 11 per-pitch factor embeddings are *summed* into one
     # d_model token, forcing the trunk to disentangle the sum. When True:

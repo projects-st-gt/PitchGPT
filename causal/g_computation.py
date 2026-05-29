@@ -231,6 +231,8 @@ class RolloutResult:
     mean_ab_length: float                # mean # of pitches the AB ended in
     ab_outcome_distribution: np.ndarray  # P(AB-outcome), shape (7,)
     n_truncated: int                     # paths that didn't terminate within max_steps
+    intervention_velo_bin_mean: float    # mean sampled velo bin at the intervention
+                                         # step across still-active paths (NaN if none)
 
     @property
     def ab_length_distribution(self) -> dict[int, int]:
@@ -323,6 +325,18 @@ def g_compute(
 
     intervention_type_id, intervention_type_name = _resolve_intervention_type(intervention_type)
     rng = np.random.default_rng(rng_seed)
+
+    # ADR-013 v7: when the execution heads (zone/velo/spin) condition on the
+    # NEXT pitch's type, the step's sampled type must be written into the
+    # working ``type`` factor BEFORE the forward whose execution-head outputs
+    # we sample zone/velo/spin from. We gate the extra forward on this flag so
+    # pre-v7 (type-marginal) checkpoints retain byte-identical behaviour.
+    type_conditioned = bool(
+        getattr(nuisance.model.config, "type_conditioned_heads", False)
+    )
+
+    # Captured at the intervention step (see below).
+    intervention_velo_bin_mean: float = float("nan")
 
     # --- Build batch + extract observed initial sequence -----------------------
     # build_single_ab_batch sets up the FULL observed AB replicated N times.
@@ -449,9 +463,6 @@ def g_compute(
             :, seq_idx_for_predicting_step,
             MODEL_PITCH_TYPES_START_IDX:MODEL_PITCH_TYPES_END_IDX,
         ]
-        zone_probs = out.propensity_probs["zone"][:, seq_idx_for_predicting_step, :]
-        velo_probs = out.propensity_probs["velo"][:, seq_idx_for_predicting_step, :]
-        spin_rate_probs = out.propensity_probs["spin_rate"][:, seq_idx_for_predicting_step, :]
         type_probs = type_probs / type_probs.sum(dim=-1, keepdim=True).clamp_min(1e-12)
 
         # Sample type (with intervention clamp at step == k).
@@ -467,6 +478,31 @@ def g_compute(
         sampled_type_prob = np.clip(sampled_type_prob, 1e-8, 1.0)
         log_weights.append(-np.log(sampled_type_prob))  # inverse-propensity weight in log space
 
+        # Write the sampled type into the working ``type`` factor at this step.
+        # The 1-indexed convention applies (dataset type_id is 1..7, PAD=0).
+        full["type"][:, step] = torch.from_numpy(
+            np.where(active, sampled_type + TYPE_ID_OFFSET, 0).astype(np.int64)
+        )
+
+        # ADR-013 v7: with type-conditioned execution heads, the zone/velo/spin
+        # heads at trunk pitch-position ``step-1`` condition on the SHIFT-LEFT
+        # of ``pitch_factors["type"]`` — i.e. on ``type[step]``. The first
+        # forward above ran with ``type[step]`` still PAD, so its execution
+        # outputs were conditioned on PAD, not the sampled type. Re-run the
+        # forward now that the step's type is written so the execution heads
+        # see the concrete (sampled / intervened) type. Per-path sampled types
+        # differ, so we cannot use ``execution_logits_for_type`` (it clamps a
+        # single scalar) — we re-forward the batched ``type`` tensor.
+        # When type_conditioned_heads is False this branch is skipped entirely
+        # and behaviour matches the pre-v7 code path exactly.
+        if type_conditioned:
+            batch_step["pitch_factors"]["type"] = full["type"][:, : step + 1]
+            out = nuisance.forward(batch_step)
+
+        zone_probs = out.propensity_probs["zone"][:, seq_idx_for_predicting_step, :]
+        velo_probs = out.propensity_probs["velo"][:, seq_idx_for_predicting_step, :]
+        spin_rate_probs = out.propensity_probs["spin_rate"][:, seq_idx_for_predicting_step, :]
+
         # Sample zone (with intervention clamp at step == k if intervention_zone is set).
         # When both type and zone are intervened, the rollout's intervention is a
         # joint (type, zone) action. The model's heads sample type and zone
@@ -480,13 +516,17 @@ def g_compute(
         sampled_velo = _sample_from_probs(velo_probs, rng, active)
         sampled_spin_rate = _sample_from_probs(spin_rate_probs, rng, active)
 
-        # Write the sampled factors into the input tensors. Use 1-indexed
-        # convention for the type factor (the dataset's type_id is 1..7 with
-        # PAD=0). The other factors are already in their own vocab spaces
-        # consistent with the dataset.
-        full["type"][:, step] = torch.from_numpy(
-            np.where(active, sampled_type + TYPE_ID_OFFSET, 0).astype(np.int64)
-        )
+        # Capture the mean sampled velo bin at the intervention step across
+        # still-active paths (the test compares do(CU) vs do(FF)).
+        if step == k:
+            if active.any():
+                intervention_velo_bin_mean = float(sampled_velo[active].mean())
+            else:
+                intervention_velo_bin_mean = float("nan")
+
+        # Write the remaining sampled factors into the input tensors. The type
+        # factor was already written above. The other factors are already in
+        # their own vocab spaces consistent with the dataset.
         full["zone"][:, step] = torch.from_numpy(sampled_zone.astype(np.int64))
         full["velo"][:, step] = torch.from_numpy(sampled_velo.astype(np.int64))
         full["spin_rate"][:, step] = torch.from_numpy(sampled_spin_rate.astype(np.int64))
@@ -627,4 +667,5 @@ def g_compute(
         mean_ab_length=mean_len,
         ab_outcome_distribution=outcome_dist,
         n_truncated=n_truncated,
+        intervention_velo_bin_mean=intervention_velo_bin_mean,
     )

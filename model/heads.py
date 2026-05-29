@@ -68,13 +68,24 @@ class PropensityHeads(nn.Module):
             nn.init.normal_(m.weight, mean=0.0, std=std)
             nn.init.zeros_(m.bias)
 
-    def forward(self, hidden: torch.Tensor) -> dict[str, torch.Tensor]:
-        """Hidden (B, T, d_model) → dict of logits per factor."""
+    def forward(
+        self,
+        hidden: torch.Tensor,
+        hidden_exec: torch.Tensor | None = None,
+    ) -> dict[str, torch.Tensor]:
+        """Hidden (B, T, d_model) → dict of logits per factor.
+
+        The TYPE head always reads ``hidden``. The execution heads (zone,
+        velo, spin_rate, spin_axis) read ``hidden_exec`` when supplied —
+        the type-conditioned fused vector (ADR-013) — else fall back to
+        ``hidden`` (pre-v7 behaviour).
+        """
+        exec_h = hidden if hidden_exec is None else hidden_exec
         type_logits = hidden @ self._type_emb_weight.T + self.type_bias
-        zone_logits = hidden @ self._zone_emb_weight.T + self.zone_bias
-        velo_logits = self.velo_proj(hidden)
-        spin_rate_logits = self.spin_rate_proj(hidden)
-        spin_axis_out = self.spin_axis_proj(hidden)
+        zone_logits = exec_h @ self._zone_emb_weight.T + self.zone_bias
+        velo_logits = self.velo_proj(exec_h)
+        spin_rate_logits = self.spin_rate_proj(exec_h)
+        spin_axis_out = self.spin_axis_proj(exec_h)
         return {
             "type": type_logits,             # (B, T, n_pitch_types)
             "zone": zone_logits,             # (B, T, n_zones)

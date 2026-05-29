@@ -429,6 +429,150 @@ def test_pitchgpt_returns_intermediates_when_requested():
 
 
 # ============================================================
+# ADR 013: type-conditioned execution heads
+# ============================================================
+
+
+def test_type_conditioned_heads_flag_defaults_off():
+    from model.config import PitchGPTConfig, tiny_config
+    assert PitchGPTConfig().type_conditioned_heads is False
+    assert tiny_config().type_conditioned_heads is False
+
+
+def test_type_conditioned_heads_flag_can_be_set():
+    from model.config import PitchGPTConfig
+    cfg = PitchGPTConfig(type_conditioned_heads=True)
+    assert cfg.type_conditioned_heads is True
+
+
+def test_propensity_heads_separate_exec_hidden():
+    import torch
+    from model.config import tiny_config
+    from model.heads import PropensityHeads
+    from model.embeddings import FactorEmbeddings
+
+    cfg = tiny_config()
+    emb = FactorEmbeddings(cfg)
+    heads = PropensityHeads(cfg, emb.type_emb.weight, emb.zone_emb.weight)
+
+    hidden = torch.randn(2, 5, cfg.d_model)
+    hidden_exec = torch.randn(2, 5, cfg.d_model)
+
+    out_default = heads(hidden)                       # hidden_exec=None -> uses hidden
+    out_split = heads(hidden, hidden_exec=hidden_exec)
+
+    # Type head ignores hidden_exec - identical in both calls.
+    assert torch.allclose(out_default["type"], out_split["type"])
+    # Execution heads differ because hidden_exec differs.
+    assert not torch.allclose(out_default["zone"], out_split["zone"])
+    assert not torch.allclose(out_default["velo"], out_split["velo"])
+
+
+def test_type_conditioned_heads_change_execution_logits():
+    """With the flag on, changing the NEXT pitch's type changes zone/velo/spin
+    logits at the conditioned position, while leaving the TYPE head untouched.
+
+    Isolation: the trunk is causal, so hidden[t] depends only on
+    type[0..t]. Changing type ONLY at the last position T-1 therefore leaves
+    hidden[t] (and the type logits) for every t <= T-2 unchanged, but it DOES
+    change next_type[T-2] = type[T-1] — the value the type-fusion MLP consumes
+    at position T-2. So any movement in the zone/velo logits at position T-2
+    must come through the type-fusion path, not the trunk.
+    """
+    import torch
+    from model.config import tiny_config
+    from model.pitchgpt import PitchGPT
+
+    cfg = tiny_config()
+    cfg.type_conditioned_heads = True
+    model = PitchGPT(cfg).eval()
+
+    B, T = 2, 5
+    batch = _fake_batch(B, T, cfg)
+    NC = PitchGPT.N_CONTEXT_TOKENS
+    last = T - 1          # pitch index changed
+    cond = T - 2          # position conditioned on next_type == type[last]
+
+    with torch.no_grad():
+        out_a = model(**batch)
+        batch_b = {**batch, "pitch_factors": {**batch["pitch_factors"]}}
+        flipped = batch_b["pitch_factors"]["type"].clone()
+        flipped[:, last] = 1  # last pitch -> FF (model id 1); earlier untouched
+        batch_b["pitch_factors"]["type"] = flipped
+        out_b = model(**batch_b)
+
+    # Execution heads at the conditioned position MUST move: only the
+    # type-fusion path connects type[last] to the zone/velo logits at cond.
+    za = out_a["propensity"]["zone"][:, NC + cond, :]
+    zb = out_b["propensity"]["zone"][:, NC + cond, :]
+    assert not torch.allclose(za, zb), "zone head ignored the next-pitch type"
+    va = out_a["propensity"]["velo"][:, NC + cond, :]
+    vb = out_b["propensity"]["velo"][:, NC + cond, :]
+    assert not torch.allclose(va, vb), "velo head ignored the next-pitch type"
+
+    # TYPE head at the conditioned position reads the raw hidden, which is
+    # causal and so unaffected by type[last]. It must NOT move.
+    ta = out_a["propensity"]["type"][:, NC + cond, :]
+    tb = out_b["propensity"]["type"][:, NC + cond, :]
+    assert torch.allclose(ta, tb), "type head was perturbed by the type-fusion path"
+
+
+def test_execution_logits_for_type_marginal_sums_to_one():
+    import torch
+    import torch.nn.functional as F
+    from model.config import tiny_config
+    from model.pitchgpt import PitchGPT
+    from data.dataset import PITCH_TYPES, MODEL_TYPE_ID
+
+    cfg = tiny_config()
+    cfg.type_conditioned_heads = True
+    model = PitchGPT(cfg).eval()
+    batch = _fake_batch(2, 6, cfg)   # (B=2, T=6) — match _fake_batch's signature
+
+    with torch.no_grad():
+        out = model(**batch)
+        # TYPE head emits 8 logits with PAD at index 0 (see CLAUDE.md). PAD is
+        # not a treatment a pitcher can choose, so π̂(type|h) for a marginal
+        # over treatments is the softmax restricted to the 7 real types and
+        # renormalized — otherwise the weights sum to 1 - π̂(PAD) < 1.
+        type_ids = [MODEL_TYPE_ID[pt] for pt in PITCH_TYPES]
+        type_logits = out["propensity"]["type"][..., type_ids]  # (B, T_total, 7)
+        type_probs = F.softmax(type_logits, dim=-1)
+        marginal = torch.zeros_like(out["propensity"]["zone"])
+        for i, pt in enumerate(PITCH_TYPES):
+            tid = MODEL_TYPE_ID[pt]
+            cond = model.execution_logits_for_type(batch, type_id=tid)["zone"]
+            w = type_probs[..., i:i + 1]
+            marginal = marginal + w * F.softmax(cond, dim=-1)
+
+    NC = PitchGPT.N_CONTEXT_TOKENS
+    s = marginal[:, NC:, :].sum(dim=-1)
+    assert torch.allclose(s, torch.ones_like(s), atol=1e-4)
+
+
+def test_nuisance_exposes_marginal_zone_backcompat():
+    import pandas as pd
+    from pathlib import Path
+    from causal.nuisance import NuisanceModels, build_single_ab_batch
+
+    ck = Path("checkpoints_modal/tiny-fold0-v6/checkpoint_calibrated.pt")
+    if not ck.exists():
+        import pytest; pytest.skip("v6 checkpoint not present")
+    nu = NuisanceModels(ck, device="cpu")
+    val = pd.read_parquet("data/augmented/2024/2024-04-01.parquet")
+    g = (val.sort_values(["game_pk", "at_bat_number", "pitch_number"])
+            .groupby(["game_pk", "at_bat_number"]))
+    ab = next(grp for _, grp in g if len(grp) >= 4)
+    batch = build_single_ab_batch(nu, ab.reset_index(drop=True))
+    out = nu.forward(batch)
+    # v6 has type_conditioned_heads=False -> marginal == plain zone head output.
+    assert out.marginal_propensity_probs["zone"].shape == out.propensity_probs["zone"].shape
+    z = out.marginal_propensity_probs["zone"][0, nu.model.N_CONTEXT_TOKENS + 1]
+    print(f"marginal zone @ pitch1 sums to {float(z.sum()):.4f}")
+    assert abs(float(z.sum()) - 1.0) < 1e-3
+
+
+# ============================================================
 # ADR 007: stop-gradient between result head and trunk
 # ============================================================
 

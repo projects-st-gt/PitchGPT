@@ -400,6 +400,7 @@ def train(
     zone_spatial_weight: float = 0.0,  # v5 14-zone — EMD aux loss coeff on zone head (0 = off)
     type_focal_gamma: float = 0.0,     # focal loss on type head (0 = CE)
     type_class_weight_alpha: float = 0.0,  # inverse-freq class weighting (0 = uniform)
+    type_conditioned_heads: bool = False,  # ADR 013 — type-condition the execution/result heads
 ) -> dict:
     """Run a single training pass; return summary dict.
 
@@ -416,6 +417,7 @@ def train(
     cfg.zone_spatial_weight = zone_spatial_weight  # v5 14-zone spatial aux loss
     cfg.type_focal_gamma = type_focal_gamma
     cfg.type_class_weight_alpha = type_class_weight_alpha
+    cfg.type_conditioned_heads = type_conditioned_heads  # ADR 013
     run_name = run_name or f"{size}-fold{fold_id}-{int(time.time())}"
     run_dir = ckpt_dir / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -732,6 +734,8 @@ def main() -> None:
                    help="focal loss gamma on the type head (0 = CE; 2 = canonical focal)")
     p.add_argument("--type-class-weight-alpha", type=float, default=0.0,
                    help="inverse-freq class weighting on type head (0 = uniform; 0.5 = mild; 1.0 = full balance)")
+    p.add_argument("--type-conditioned-heads", action="store_true",
+                   help="type-condition the execution/result heads via the type_fusion MLP (ADR 013)")
     args = p.parse_args()
 
     train(
@@ -759,6 +763,7 @@ def main() -> None:
         zone_spatial_weight=args.zone_spatial_weight,
         type_focal_gamma=args.type_focal_gamma,
         type_class_weight_alpha=args.type_class_weight_alpha,
+        type_conditioned_heads=args.type_conditioned_heads,
     )
 
 
