@@ -193,6 +193,23 @@ app.add_middleware(
 )
 
 
+@app.on_event("startup")
+def _warm_app_state() -> None:
+    """Eagerly load the model, val pitches, and game-teams lookup at boot.
+
+    Without this, the *first* user request pays the ~5–10 s load cost — the
+    demo's first impression. Doing it at startup means uvicorn takes a few
+    extra seconds to come up, then every request is hot. The lazy-load paths
+    in :class:`AppState` are preserved for tests / scripts that import the
+    app without going through the startup event.
+    """
+    print("[api] warming AppState at startup...")
+    AppState.get_nuisance()
+    AppState.get_val()
+    AppState.get_game_teams()
+    print("[api] startup complete; all heavy artifacts loaded.")
+
+
 # ============================================================
 # Helpers
 # ============================================================
