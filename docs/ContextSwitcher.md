@@ -1,6 +1,6 @@
 # ContextSwitcher — Pick up where this session left off
 
-**Last updated**: 2026-05-29, mid-implementation of MCSim App B (pre-game matchup card).
+**Last updated**: 2026-06-01, mid-implementation of MCSim App B (pre-game matchup card). Step 4 (matchup-card computer) is done, tested, committed, and pushed. Step 5 (CLI runner) is next.
 
 This is the handoff doc for a new Claude session (or a VS Code restart). Read it cold; the project state below is everything you need to keep going.
 
@@ -8,9 +8,9 @@ This is the handoff doc for a new Claude session (or a VS Code restart). Read it
 
 ## TL;DR — where to resume
 
-You are in the middle of building **MCSim App B (pre-game matchup card)** on branch `mcsim-app-b-matchup-card`. Five commits in, half done. Next concrete step:
+You are in the middle of building **MCSim App B (pre-game matchup card)** on branch `mcsim-app-b-matchup-card`. Six commits in. Step 4 (the matchup-card computer) just landed. Next concrete step:
 
-> **Implement `mcsim/matchup_card.py`** — the per-game cell loop that ties every primitive we've built (g_compute natural mode + storage + state builder) into one function: `(game_spec → SQLite row written)`.
+> **Implement `scripts/mcsim/run_matchup_cards.py`** — the end-to-end CLI runner that takes a date + game_pk list, calls `compute_matchup_card`, and persists each card via `storage.write_prediction`. This is the first place the storage layer and the card computer meet.
 
 See "Next concrete step" section below for the precise contract.
 
@@ -20,8 +20,8 @@ See "Next concrete step" section below for the precise contract.
 
 Continuing App B v1 backend (~3 more focused days):
 
-1. **Step 4 — `mcsim/matchup_card.py`** ← next
-2. **Step 5 — CLI runner** (`scripts/mcsim/run_matchup_cards.py`)
+1. ~~**Step 4 — `mcsim/matchup_card.py`**~~ ✅ done (commit `67f0629`)
+2. **Step 5 — CLI runner** (`scripts/mcsim/run_matchup_cards.py`) ← next
 3. **Step 6 — MLB Stats API client** (`scripts/mcsim/mlbstats.py` — schedule, probable pitchers, lineups, bullpen days-rest)
 4. **Step 7 — Post-game actuals fetcher**
 5. **Step 8 — Read API endpoints** (`GET /mcsim/predictions?date=...`, `GET /mcsim/predictions/{game_pk}`)
@@ -32,7 +32,7 @@ After App B v1 lands: App A (daily score prediction) needs a multi-AB state mach
 
 ## Current branch: `mcsim-app-b-matchup-card`
 
-Five commits on this branch since branching from main:
+Six commits on this branch since branching from main:
 
 | # | Commit | What | Tests |
 |---|---|---|:---:|
@@ -41,8 +41,9 @@ Five commits on this branch since branching from main:
 | 3 | `4da1a1c` | **Storage layer** — `mcsim/storage.py` + SQLite schema (predictions, actuals, model_versions) + 12 round-trip tests | 12 |
 | 4 | `d54bd81` | **Option C** — relax `intervention_position >= 1` to `>= 0` (first-pitch rollouts work — propensity at last context-token position) | 3 |
 | 5 | `a94210f` | **Synthetic-AB builder** — `mcsim/state.py` with `ReferenceContext` dataclass + `build_synthetic_ab()` | 11 |
+| 6 | `67f0629` | **Matchup-card computer** — `mcsim/matchup_card.py` with `compute_matchup_card` + `PitcherSpec`/`BatterSpec`; exposes `RolloutResult.intervention_type_propensity` for the trust gate | 6 |
 
-**Full test suite: 341 pass.** Branch pushed to origin.
+**Full test suite: 347 pass.** Branch pushed to origin.
 
 The brainstorm doc (`docs/mcsim_appB_brainstorm.md`) is the source of truth for all design decisions. Read it before writing more code.
 
@@ -62,48 +63,54 @@ Two other branches with parked work (don't merge):
 
 ---
 
-## Next concrete step — `mcsim/matchup_card.py`
+## Step 4 done — `mcsim/matchup_card.py` (commit `67f0629`)
 
-The function to write:
+`compute_matchup_card(nuisance, *, game_pk, game_date, home_team, away_team,
+home_pitchers, away_pitchers, home_lineup, away_lineup, …, n_paths=1000,
+rng_seed=None, context=None) -> dict` is built and tested (6 tests). It loops
+every (pitcher, batter) cell across both half-grids, builds a synthetic
+reference-state AB, rolls it out in natural mode
+(`intervention_position=0, intervention_type=None`), and packs the per-game
+payload. Returns the dict; does NOT persist. Key choices that landed:
 
-```python
-def compute_matchup_card(
-    nuisance: NuisanceModels,
-    *,
-    game_pk: int,
-    game_date: str,                          # "YYYY-MM-DD"
-    home_pitchers: list[PitcherSpec],        # starter + bullpen, ordered
-    away_pitchers: list[PitcherSpec],
-    home_lineup: list[BatterSpec],           # ordered 1-9
-    away_lineup: list[BatterSpec],
-    ballpark_id: int = 0,
-    umpire_id: int = 0,
-    catcher_home_id: int = 0,
-    catcher_away_id: int = 0,
-    n_paths: int = 1000,
-    rng_seed: int | None = None,
-    context: ReferenceContext | None = None,
-) -> dict:
-    """Return the per-game card payload (the JSON shape from the brainstorm
-    doc § Storage Schema → 'payload JSON shape for a matchup card')."""
-```
+- RV median/p05/p95 come from the **per-path `run_value` array** (truncated
+  paths are NaN and excluded) — not derived from mean/SE.
+- Per-cell seed = `rng_seed + cell_index` (reproducible, not identically
+  correlated).
+- Trust flag reads the exposed `RolloutResult.intervention_type_propensity`
+  (the exact π̂(type|h) the rollout sampled from) — no second forward pass.
+- Language discipline: cells are **predictive rollouts, not causal
+  estimates.** `PositivityGate` is borrowed only for its trust state; its
+  causal rationale string is deliberately not surfaced.
 
-Pseudo-implementation:
+Named numerical check from a real cell: `[HomeSP vs AwayBat1]` median RV
+= −0.1000 (p05 −0.15, p95 +1.11); top-1 = out; modal type = FS at π̂=0.327;
+trust = green; 0/50 truncated.
 
-```python
-1. For each (P, B) cell in {(home_pitchers, away_lineup), (away_pitchers, home_lineup)}:
-   - ab = build_synthetic_ab(pitcher_id=P.id, batter_id=B.id, ...)
-   - r = g_compute(nuisance, ab, intervention_position=0,
-                   intervention_type=None, n_paths=n_paths, rng_seed=rng_seed)
-   - Extract cell: median RV + 5/95 percentile, top-1 outcome, π̂(modal type),
-                   trust state from PositivityGate(modal_p_hat), n_truncated.
-2. Pack into the payload dict (matches the brainstorm spec).
-3. Return the dict (don't persist here — storage.write_prediction is the caller's job).
-```
+---
 
-`PitcherSpec`/`BatterSpec` are small dataclasses: `(id, name, throws/stand)`.
+## Next concrete step — `scripts/mcsim/run_matchup_cards.py` (Step 5)
 
-Estimated time: ~half day. Tests will be slow (~few minutes for a 63-cell integration test) — keep them small in CI (e.g., 2 pitchers × 2 batters × n_paths=50).
+The CLI runner that takes a date + game_pk list, calls `compute_matchup_card`
+for each game, and persists each card via `storage.write_prediction`. This is
+the first place the storage layer and the card computer meet.
+
+Open design questions to resolve at the top of Step 5 (Step 6's MLB Stats API
+client doesn't exist yet, so lineups/pitchers must come from somewhere):
+
+- **Where do `PitcherSpec`/`BatterSpec` lists come from for v1?** A hand-authored
+  JSON/YAML game-spec file passed via `--spec`? Or stub IDs for a smoke run
+  until Step 6 lands the real fetcher?
+- **Model checkpoint loading** — reuse `NuisanceModels` loader; record
+  `model_ckpt_hash` via `storage.register_model_version`.
+- **Idempotency / re-run** — `write_prediction` upserts on (game_pk, date, app);
+  CLI sets `app="matchup_card"` (the validated key; `storage.py:125` rejects
+  anything but `"matchup_card"`/`"score_prediction"`).
+- **CLI surface** — `--date`, `--game-pk` (repeatable) or `--spec`, `--n-paths`,
+  `--rng-seed`, `--db-path`, `--dry-run` (compute + print, don't write).
+
+Estimated time: ~half day. Tests should stub `compute_matchup_card` (or use
+n_paths=50, 1 game, 2×2 grid) so CI stays fast.
 
 ---
 
@@ -244,10 +251,12 @@ ps aux | grep -E "build_profile_cache|build_matchup_cache|train_pitchgpt|run_mat
 | `mcsim/__init__.py` | Package docstring. |
 | `mcsim/storage.py` | SQLite layer + 8 public functions. |
 | `mcsim/state.py` | `ReferenceContext` + `build_synthetic_ab()`. |
-| `causal/g_computation.py` | `g_compute(intervention_type=None, intervention_position=0)` both supported now. |
+| `mcsim/matchup_card.py` | `compute_matchup_card()` + `PitcherSpec`/`BatterSpec`. Step 4. |
+| `causal/g_computation.py` | `g_compute(intervention_type=None, intervention_position=0)` both supported now; `RolloutResult.intervention_type_propensity` exposed for the trust gate. |
 | `tests/test_g_compute_natural_mode.py` | 8 tests pinning D4 + Option C. |
 | `tests/test_mcsim_storage.py` | 12 tests pinning the storage layer. |
 | `tests/test_mcsim_state.py` | 11 tests pinning the state builder. |
+| `tests/test_mcsim_matchup_card.py` | 6 tests pinning the card computer. |
 | `model/pitchgpt_dataset.py` | `REQUIRED_AUG_COLS`, `PITCH_FACTOR_COLS_INT`, `CATEGORICAL_CTX_COLS` — the schema App B's state builder targets. |
 
 ---
@@ -263,12 +272,12 @@ ps aux | grep -E "build_profile_cache|build_matchup_cache|train_pitchgpt|run_mat
 3. **Re-read this doc + `docs/mcsim_appB_brainstorm.md` § Implementation order.**
 4. **Quick sanity that everything still works:**
    ```sh
-   uv run pytest tests/test_mcsim_storage.py tests/test_mcsim_state.py -q
+   uv run pytest tests/test_mcsim_storage.py tests/test_mcsim_state.py tests/test_mcsim_matchup_card.py -q
    ```
-   Should print: `23 passed in ~10s`.
-5. **Start step 4** — write `mcsim/matchup_card.py` per the contract in "Next concrete step" above.
-6. **Discipline:** before claiming anything works, print named numerical output (e.g., a real cell's mean RV + π̂(modal type)).
-7. **When done with step 4**, commit + push + report to user. Don't push past step 4 without checking in.
+   Should print: `29 passed`.
+5. **Start step 5** — write `scripts/mcsim/run_matchup_cards.py` per the contract in "Next concrete step" above. Resolve the open design questions there first.
+6. **Discipline:** before claiming anything works, print named numerical output (e.g., a real cell's median RV + π̂(modal type) from an end-to-end run that landed a SQLite row).
+7. **When done with step 5**, commit + push + report to user. Don't push past step 5 without checking in.
 
 ---
 
