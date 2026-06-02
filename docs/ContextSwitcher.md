@@ -145,7 +145,15 @@ end-to-end works").**
 - New unit: `mcsim/mlb_api.py` (schedule + roster client, its own tests) so the
   HTTP concern is isolated and testable; runner orchestrates.
 
-**STATUS: design not yet approved — finish brainstorming → spec → plan before code.**
+**STATUS: design + spec + plan APPROVED (2026-06-02). Ready to implement.**
+- Spec: `docs/superpowers/specs/2026-06-02-mcsim-appB-step5-live-runner-design.md`
+- Plan: `docs/superpowers/plans/2026-06-02-mcsim-appB-step5-live-runner.md` (5 TDD tasks)
+- Extra verified finding: **missing profiles do NOT crash** — `ProfileCache.lookup`
+  falls back to league-mean then zeros (`data/profile_cache_loader.py:149`). So
+  the runner needs only a per-GAME try/except, not per-cell. Debut players get a
+  league-mean profile (principled degrade, not fabrication).
+- Switch hitters (`batSide=='S'`) resolve to `'L'` in v1 (vs the more common RHP);
+  per-pitcher resolution deferred (would need `compute_matchup_card` to vary stand).
 
 ---
 
