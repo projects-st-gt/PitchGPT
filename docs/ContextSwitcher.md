@@ -89,28 +89,63 @@ trust = green; 0/50 truncated.
 
 ---
 
-## Next concrete step — `scripts/mcsim/run_matchup_cards.py` (Step 5)
+## Next step — Step 5+6 (MERGED): live MLB-API runner (BRAINSTORM IN PROGRESS)
 
-The CLI runner that takes a date + game_pk list, calls `compute_matchup_card`
-for each game, and persists each card via `storage.write_prediction`. This is
-the first place the storage layer and the card computer meet.
+**Decision (user, 2026-06-01):** pull live from the MLB Stats API *now* — this
+merges the planned Step 6 (MLB client) into Step 5. And use an **all-vs-all
+roster grid**, not the posted 9-batter lineup.
 
-Open design questions to resolve at the top of Step 5 (Step 6's MLB Stats API
-client doesn't exist yet, so lineups/pitchers must come from somewhere):
+### Why all-vs-all (the lineup problem)
+Empirically probed against `statsapi.mlb.com` this session:
 
-- **Where do `PitcherSpec`/`BatterSpec` lists come from for v1?** A hand-authored
-  JSON/YAML game-spec file passed via `--spec`? Or stub IDs for a smoke run
-  until Step 6 lands the real fetcher?
-- **Model checkpoint loading** — reuse `NuisanceModels` loader; record
-  `model_ckpt_hash` via `storage.register_model_version`.
-- **Idempotency / re-run** — `write_prediction` upserts on (game_pk, date, app);
-  CLI sets `app="matchup_card"` (the validated key; `storage.py:125` rejects
-  anything but `"matchup_card"`/`"score_prediction"`).
-- **CLI surface** — `--date`, `--game-pk` (repeatable) or `--spec`, `--n-paths`,
-  `--rng-seed`, `--db-path`, `--dry-run` (compute + print, don't write).
+| Run timing | Probable pitchers | Real lineups | Actuals |
+|---|:---:|:---:|:---:|
+| Past date (all 2025) | ✅ | ✅ (9/side) | ✅ |
+| Today, day-of (Pre-Game/Warmup) | ✅ | ✅ (~hrs before 1st pitch) | — |
+| Tomorrow / future | ✅ (13–14/15) | ❌ **0 games** | — |
 
-Estimated time: ~half day. Tests should stub `compute_matchup_card` (or use
-n_paths=50, 1 game, 2×2 grid) so CI stays fast.
+So D5's "night-before with probable lineups" is **false** — MLB posts confirmed
+lineups only ~2–4h pre-first-pitch. User's fix: skip lineups entirely, grid the
+**full active roster** (available night-before via the roster endpoint):
+`/api/v1/teams/{id}/roster?rosterType=active&date=…` → 26 players splitting
+cleanly into ~13 pitchers + ~13 position players by `position.type=='Pitcher'`.
+This is a *better* dugout doc — it helps build a lineup, not just react to one.
+
+### Verified this session
+- API reachable; `requests 2.33.1` + `pybaseball 2.2.7` installed; no existing MLB client code.
+- statsapi player IDs are MLBAM = same namespace as Statcast `pitcher`/`batter` (no crosswalk). Skenes=694973.
+- Roster endpoint returns id/name/position the night before. ✅
+- **Per-cell benchmark (v7, CPU, 8 threads): 39.87s @ n_paths=1000, LINEAR in n_paths (~33–40 ms/path).** The old "sublinear" hunch was wrong.
+
+### The compute catch
+All-vs-all ≈ **338 cells/game** (2 × ~13 × ~13) vs the old 63. At n_paths=1000
+that's **57.7h for 15 games** — NOT nightly-feasible single-process. Linear
+knob → n_paths=200 ≈ 12.7h/15. Levers: lower n_paths, multiprocessing across
+cores, or run a subset. **v1 plan: build correct + sequential, validate on ONE
+real game, measure true wall-clock, THEN tune (per D8 "no cron until manual
+end-to-end works").**
+
+### Open flags to verify in implementation
+- **Handedness**: `build_synthetic_ab` needs `pitcher_throws`/`batter_stand`;
+  roster `person` object may need `hydrate=person` to expose pitchHand/batSide. VERIFY.
+- **Missing profiles**: just-called-up players may have no trailing-window
+  profile → per-cell try/except + skip-with-log (no crash, no fabrication).
+- `compute_matchup_card` itself needs **no change** — it already loops
+  pitchers × batters over arbitrary-length lists; runner just feeds full rosters.
+- Flag the probable starter via `is_starter=True` inside the all-staff grid.
+
+### Settled mechanics
+- Reuse `NuisanceModels(V7_CKPT, device="cpu")`; default ckpt
+  `checkpoints_modal/tiny-fold0-v7/checkpoint_calibrated.pt`.
+- `model_ckpt_hash`: **no helper exists** — compute it (e.g. truncated sha256 of
+  ckpt file); `register_model_version` once per run.
+- Persist via `write_prediction(..., app="matchup_card")` (validated key, `storage.py:125`).
+- CLI surface (planned): `--date`, `--game-pk` (repeatable filter), `--n-paths`,
+  `--rng-seed`, `--ckpt`, `--db-path`, `--max-games`, `--dry-run`.
+- New unit: `mcsim/mlb_api.py` (schedule + roster client, its own tests) so the
+  HTTP concern is isolated and testable; runner orchestrates.
+
+**STATUS: design not yet approved — finish brainstorming → spec → plan before code.**
 
 ---
 
