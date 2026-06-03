@@ -208,3 +208,27 @@ def test_write_prediction_sanitizes_non_finite_to_null(tmp_path: Path):
     got = read_prediction(conn, game_pk=7, prediction_date="2026-06-03",
                           app="matchup_card")
     assert got["payload"]["rows"][0]["cell"]["rv"] is None
+
+
+def test_connection_usable_across_threads(tmp_path: Path):
+    """FastAPI resolves a sync dependency and runs the endpoint in different
+    threadpool threads, so a per-request connection is created in one thread
+    and used in another. Pin that this no longer raises
+    sqlite3.ProgrammingError (check_same_thread=False)."""
+    import threading
+
+    conn = init_db(tmp_path / "threaded.sqlite")
+    write_prediction(conn, game_pk=1, prediction_date="2026-06-04",
+                     app="matchup_card", payload={"ok": 1}, model_ckpt_hash="h")
+
+    result = {}
+
+    def _reader():
+        # use the SAME connection object from a different thread (the bug repro)
+        result["row"] = read_prediction(conn, game_pk=1,
+                                        prediction_date="2026-06-04", app="matchup_card")
+
+    t = threading.Thread(target=_reader)
+    t.start()
+    t.join()
+    assert result["row"] is not None and result["row"]["payload"]["ok"] == 1

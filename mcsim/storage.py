@@ -104,7 +104,12 @@ def init_db(db_path: Path = DEFAULT_DB_PATH) -> sqlite3.Connection:
     """
     db_path = Path(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path))
+    # check_same_thread=False: FastAPI runs a sync dependency and its endpoint in
+    # different threadpool threads, so a per-request connection is created in one
+    # thread and used in another. We never use one connection concurrently (each
+    # request gets its own, used sequentially), so this is safe; single-threaded
+    # callers (runner, tests) are unaffected.
+    conn = sqlite3.connect(str(db_path), check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.executescript(_SCHEMA_SQL)
     # PRAGMA needs its own statement to read back the value
