@@ -49,6 +49,54 @@ def _opt_id(obj: Optional[dict]) -> Optional[int]:
     return None
 
 
+def _resolve_stand(bat_side_code: str, *, switch_default: str = "L") -> str:
+    """Map a batSide code to 'R'/'L' (build_synthetic_ab requires those).
+
+    Switch hitters ('S') resolve to a fixed side for v1 (default 'L', the
+    platoon side vs the more common RHP). Per-pitcher resolution is a
+    documented follow-up — compute_matchup_card uses a fixed stand per
+    BatterSpec, so true per-cell resolution would need it to vary by pitcher.
+    """
+    if bat_side_code in ("R", "L"):
+        return bat_side_code
+    return switch_default
+
+
+def get_active_roster(
+    team_id: int,
+    date: str,
+    *,
+    probable_pitcher_id: Optional[int] = None,
+) -> tuple[list[PitcherSpec], list[BatterSpec]]:
+    """Return (pitchers, position_players) for a team's active roster on ``date``.
+
+    Splits by position type; attaches handedness from the person hydrate. The
+    probable starter (if its id matches a rostered pitcher) gets is_starter=True.
+    """
+    url = (f"{API_BASE}/teams/{team_id}/roster?rosterType=active"
+           f"&date={date}&hydrate=person")
+    data = _get_json(url)
+    pitchers: list[PitcherSpec] = []
+    hitters: list[BatterSpec] = []
+    for entry in data.get("roster", []):
+        person = entry.get("person", {})
+        pid = int(person["id"])
+        name = person.get("fullName", str(pid))
+        if entry["position"]["type"] == "Pitcher":
+            throws = (person.get("pitchHand") or {}).get("code", "R")
+            pitchers.append(PitcherSpec(
+                id=pid,
+                name=name,
+                throws=throws if throws in ("R", "L") else "R",
+                is_starter=(probable_pitcher_id is not None
+                            and pid == probable_pitcher_id),
+            ))
+        else:
+            stand = _resolve_stand((person.get("batSide") or {}).get("code", "R"))
+            hitters.append(BatterSpec(id=pid, name=name, stand=stand))
+    return pitchers, hitters
+
+
 def get_schedule(date: str) -> list[GameInfo]:
     """Return one GameInfo per scheduled game on ``date`` (YYYY-MM-DD)."""
     url = f"{API_BASE}/schedule?sportId=1&date={date}&hydrate=probablePitcher"

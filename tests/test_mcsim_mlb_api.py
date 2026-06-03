@@ -60,3 +60,44 @@ def test_get_schedule_skips_malformed_game(monkeypatch):
 def test_get_schedule_empty_returns_empty(monkeypatch):
     monkeypatch.setattr(mlb_api, "_get_json", lambda url, **kw: {"dates": []})
     assert mlb_api.get_schedule("2026-06-02") == []
+
+
+_ROSTER_JSON = {
+    "roster": [
+        {"position": {"type": "Pitcher", "abbreviation": "P"},
+         "person": {"id": 111, "fullName": "Righty Starter",
+                    "pitchHand": {"code": "R"}, "batSide": {"code": "R"}}},
+        {"position": {"type": "Pitcher", "abbreviation": "P"},
+         "person": {"id": 112, "fullName": "Lefty Reliever",
+                    "pitchHand": {"code": "L"}, "batSide": {"code": "L"}}},
+        {"position": {"type": "Infielder", "abbreviation": "2B"},
+         "person": {"id": 201, "fullName": "Switch Hitter",
+                    "pitchHand": {"code": "R"}, "batSide": {"code": "S"}}},
+        {"position": {"type": "Outfielder", "abbreviation": "CF"},
+         "person": {"id": 202, "fullName": "Lefty Bat",
+                    "pitchHand": {"code": "L"}, "batSide": {"code": "L"}}},
+    ]
+}
+
+
+def test_get_active_roster_splits_and_handedness(monkeypatch):
+    monkeypatch.setattr(mlb_api, "_get_json", lambda url, **kw: _ROSTER_JSON)
+    pitchers, hitters = mlb_api.get_active_roster(139, "2026-06-02",
+                                                  probable_pitcher_id=111)
+    assert [p.id for p in pitchers] == [111, 112]
+    assert [h.id for h in hitters] == [201, 202]
+    assert all(isinstance(p, PitcherSpec) for p in pitchers)
+    assert all(isinstance(h, BatterSpec) for h in hitters)
+    # handedness
+    assert pitchers[0].throws == "R" and pitchers[1].throws == "L"
+    # probable starter flagged
+    assert pitchers[0].is_starter is True and pitchers[1].is_starter is False
+    # switch hitter resolves to 'L' for v1; explicit-side hitter unchanged
+    assert hitters[0].stand == "L"   # was "S"
+    assert hitters[1].stand == "L"
+
+
+def test_get_active_roster_no_probable(monkeypatch):
+    monkeypatch.setattr(mlb_api, "_get_json", lambda url, **kw: _ROSTER_JSON)
+    pitchers, _ = mlb_api.get_active_roster(139, "2026-06-02")
+    assert all(p.is_starter is False for p in pitchers)
