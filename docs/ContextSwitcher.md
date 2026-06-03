@@ -8,7 +8,7 @@ This is the handoff doc for a new Claude session (or a VS Code restart). Read it
 
 ## TL;DR — where to resume
 
-You are building **MCSim App B (pre-game matchup card)** on branch `mcsim-app-b-matchup-card`. **Steps 4, 5, AND 6 are done** (Step 6 was merged into Step 5 — live MLB-API runner). The runner has been validated end-to-end on a real game. Next concrete step:
+**Steps 4, 5, AND 6 of MCSim App B are DONE and MERGED TO `main`** (branch `mcsim-app-b-matchup-card` was merged `--no-ff` at `a15f395` and deleted locally; `main` is ahead of `origin/main` by 21 commits — **unpushed** as of 2026-06-03). Step 6 was merged into Step 5 (live MLB-API runner). The runner was validated end-to-end on a real game. **Start Step 7 on a fresh branch off `main`.** Next concrete step:
 
 > **Step 7 — post-game actuals fetcher.** Pull the real final score + matchup events for a past game date from the MLB Stats API and write them via `storage.write_actual` (two-pass COALESCE upsert) so predictions can be overlaid with what actually happened.
 
