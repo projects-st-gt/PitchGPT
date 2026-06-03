@@ -8,9 +8,11 @@ This is the handoff doc for a new Claude session (or a VS Code restart). Read it
 
 ## TL;DR — where to resume
 
-**MCSim App B Steps 4–6 are DONE + MERGED + PUSHED to `main`** (`origin/main` is current). **Step 7 (post-game actuals) is DONE on branch `mcsim-app-b-actuals`** (off `main`; 3 commits, NOT yet merged as of 2026-06-03). Step 6 was folded into Step 5 (live MLB-API runner). Both runner and actuals fetcher validated end-to-end on real games. **Next: merge `mcsim-app-b-actuals`, then start Step 8 (read API endpoints).** Next concrete step:
+**MCSim App B v1 BACKEND IS COMPLETE.** Steps 4–7 are merged+pushed to `main`. **Step 8 (read API endpoints) is DONE on branch `mcsim-app-b-read-api`** (off `main`; NOT yet merged as of 2026-06-03). All five backend pieces exist: storage, synthetic-state builder, matchup-card computer, live MLB-API runner, post-game actuals fetcher, and read endpoints. **Next big piece: the MCSim frontend tab** (date carousel + card grid + result overlay) — separate scope, uses `frontend-system`. Next concrete step:
 
-> **Step 8 — read API endpoints.** `GET /mcsim/predictions?date=...` (date carousel) + `GET /mcsim/predictions/{game_pk}` (one card, with the actuals overlaid if the game has finished). Reads from `mcsim/storage.py`; mirrors the FastAPI patterns in `inference/api.py`.
+> **MCSim frontend tab.** Date carousel → per-game matchup-card grid (pitchers × hitters) → result overlay once a game finishes. Wire to the Step 8 endpoints (`/mcsim/predictions?date=...`, `/mcsim/predictions/{game_pk}`). Use `frontend-system` skill (Inter, 3 colors, color+glyph for pitch types). Headline cells on **mean RV or OPS**, not median RV.
+
+> **Step 8 (done) — read API.** `inference/mcsim_api.py`: model-free `APIRouter` mounted on the main app. `GET /mcsim/predictions?date=` → per-game summaries (carousel); `GET /mcsim/predictions/{game_pk}?date=` → full card with each (pitcher,batter) cell stamped with the real PA(s) (`actual.pa_count`+`events`; cells that didn't happen → `null`; PAs outside the grid → `unmatched_event_count`). DB via `get_conn` dependency (override in tests). Tests: `test_mcsim_api.py` (6).
 
 **Step 7 (done) — actuals layer.** `mcsim/mlb_actuals.py::get_game_actuals` parses the MLB live feed (`/api/v1.1/game/{pk}/feed/live`) → final score + winner + per-PA events (pitcher, batter, **start context: bases reconstructed from `runners[].movement.originBase`, outs from first pitch — NOT `matchup.splits.menOnBase`, which is a stat-split label and reports RISP for a leadoff hitter**, verified). `scripts/mcsim/fetch_actuals.py` is the CLI (per date, writes Final games via `storage.write_actual`; non-final skipped). Validated on game 777079 (Giants @ Jays 6–8, 75 PAs). Tests: `test_mcsim_mlb_actuals.py` (4) + `test_mcsim_fetch_actuals.py` (2).
 
@@ -28,9 +30,10 @@ Continuing App B v1 backend (~3 more focused days):
 2. ~~**Step 5 — CLI runner** (`scripts/mcsim/run_matchup_cards.py`)~~ ✅ done
 3. ~~**Step 6 — MLB Stats API client**~~ ✅ done — MERGED into Step 5 as `mcsim/mlb_api.py` (schedule + active-roster; lineups dropped in favour of all-vs-all roster grid)
 4. ~~**Step 7 — Post-game actuals fetcher**~~ ✅ done — `mcsim/mlb_actuals.py` + `scripts/mcsim/fetch_actuals.py` (branch `mcsim-app-b-actuals`)
-5. **Step 8 — Read API endpoints** ← next (`GET /mcsim/predictions?date=...`, `GET /mcsim/predictions/{game_pk}`, + actuals overlay)
-6. (perf, optional) Runner multiprocessing — needed for a full 15-game nightly batch at n_paths=250
-7. (eval) Pooled per-PA calibration: reliability diagram/ECE over real PAs vs the model's per-matchup probabilities (context-matched). This is the real App-B validation — single cells can't be validated (1–4 real PAs each).
+5. ~~**Step 8 — Read API endpoints**~~ ✅ done — `inference/mcsim_api.py` (`GET /mcsim/predictions?date=...` summaries + `GET /mcsim/predictions/{game_pk}` full card with per-cell actuals overlay), mounted on the main app.
+6. **App B v1 backend is COMPLETE.** Next big piece: **MCSim frontend tab** (date carousel + per-game card grid + result overlay) — uses `frontend-system` skill. Headline the card on **mean RV or OPS, not median RV** (median is a weak discriminator — see below).
+7. (perf, optional) Runner multiprocessing — needed for a full 15-game nightly batch at n_paths=250.
+8. (eval) Pooled per-PA calibration: reliability diagram/ECE over real PAs vs the model's per-matchup probabilities (context-matched). The real App-B validation — single cells can't be validated (1–4 real PAs each). Also calibration-check the projected OPS magnitude.
 
 After App B v1 lands: App A (daily score prediction) needs a multi-AB state machine. MCSim brainstorm doc has design notes; that's a separate substantial project.
 
