@@ -147,6 +147,14 @@ def test_cell_fields_valid(setup):
             np.testing.assert_allclose(sum(dist.values()), 1.0, atol=1e-5)
             # top-1 outcome must be the argmax of the distribution
             assert cell["predicted_top1_outcome"] == max(dist, key=dist.get)
+            # projected slash line — derived from the same outcome dist
+            assert 0.0 <= cell["predicted_obp"] <= 1.0
+            assert cell["predicted_slg"] >= 0.0
+            np.testing.assert_allclose(
+                cell["predicted_ops"],
+                cell["predicted_obp"] + cell["predicted_slg"],
+                atol=1e-9,
+            )
 
 
 @requires_v7
@@ -177,6 +185,8 @@ def test_named_numerical_output(setup):
         f"(p05 {cell['predicted_rv_p05']:+.4f}, p95 {cell['predicted_rv_p95']:+.4f}); "
         f"top-1 outcome = {cell['predicted_top1_outcome']}; "
         f"modal type = {cell['modal_type']} at π̂ = {cell['p_hat_top_type']:.3f}; "
+        f"projected slash = {cell['predicted_obp']:.3f}/{cell['predicted_slg']:.3f}/"
+        f"{cell['predicted_ops']:.3f} (OBP/SLG/OPS); "
         f"trust = {cell['trust_state']}; n_truncated = {cell['n_truncated']}/{cell['n_paths']}"
     )
     # The π̂ should be non-degenerate — a real first-pitch propensity, not 1/7.
@@ -184,3 +194,34 @@ def test_named_numerical_output(setup):
         f"modal π̂ {cell['p_hat_top_type']:.3f} looks degenerate — "
         "is intervention_type_propensity wired correctly?"
     )
+
+
+# ============================================================
+# Slash-line formula (pure, no model needed)
+# ============================================================
+
+
+def test_slash_line_known_distribution():
+    """_slash_line computes projected OBP/SLG/OPS from the AB-outcome dist.
+    Pinned against a hand-computed distribution so a formula slip is visible."""
+    from mcsim.matchup_card import _slash_line
+
+    # 10% single, 5% double, 5% HR, 10% walk, rest K/out (sums to 1.0).
+    d = {"1B": 0.10, "2B": 0.05, "3B": 0.0, "HR": 0.05,
+         "BB": 0.10, "K": 0.30, "out": 0.40}
+    obp, slg, ops = _slash_line(d)
+
+    # OBP = hits + BB = (0.10+0.05+0.05) + 0.10 = 0.30
+    assert abs(obp - 0.30) < 1e-9
+    # TB = 1*0.10 + 2*0.05 + 4*0.05 = 0.40; AB = 1 - 0.10 = 0.90
+    assert abs(slg - (0.40 / 0.90)) < 1e-9
+    assert abs(ops - (0.30 + 0.40 / 0.90)) < 1e-9
+
+
+def test_slash_line_all_walks_guards_zero_ab():
+    """All-walk degenerate case: AB=0, SLG must be 0 (no division by zero)."""
+    from mcsim.matchup_card import _slash_line
+
+    d = {"1B": 0.0, "2B": 0.0, "3B": 0.0, "HR": 0.0, "BB": 1.0, "K": 0.0, "out": 0.0}
+    obp, slg, ops = _slash_line(d)
+    assert obp == 1.0 and slg == 0.0 and ops == 1.0

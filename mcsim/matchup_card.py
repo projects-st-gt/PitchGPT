@@ -66,6 +66,43 @@ class BatterSpec:
 
 
 # ============================================================
+# Projected slash line
+# ============================================================
+
+
+def _slash_line(outcome_dist: dict) -> tuple[float, float, float]:
+    """Projected (OBP, SLG, OPS) from the AB-outcome distribution.
+
+    These are *aggregate* (ratio) stats, computed from the pooled per-PA
+    outcome probabilities — NOT per-path like run value (a single PA has no
+    well-defined SLG, since its AB denominator is 0 or 1). Each path is one
+    plate appearance, so the probabilities sum to one PA:
+
+    - ``OBP = P(reach base) = P(1B)+P(2B)+P(3B)+P(HR)+P(BB)`` (denominator PA=1).
+    - ``SLG = total_bases / AB`` where ``AB = 1 - P(BB)`` (K and outs are
+      at-bats; walks are not).
+    - ``OPS = OBP + SLG``.
+
+    HBP and sacrifice flies are absent from the outcome vocabulary, so this is
+    a close approximation of official OBP/OPS (HBP is ~1% of PAs). The model's
+    outcome calibration governs the absolute level; relative ordering across
+    cells is the immediately useful signal.
+    """
+    bb = outcome_dist["BB"]
+    hits = outcome_dist["1B"] + outcome_dist["2B"] + outcome_dist["3B"] + outcome_dist["HR"]
+    obp = hits + bb
+    total_bases = (
+        outcome_dist["1B"]
+        + 2 * outcome_dist["2B"]
+        + 3 * outcome_dist["3B"]
+        + 4 * outcome_dist["HR"]
+    )
+    ab = 1.0 - bb  # K and outs are at-bats; walks are not
+    slg = total_bases / ab if ab > 0 else 0.0
+    return obp, slg, obp + slg
+
+
+# ============================================================
 # One cell
 # ============================================================
 
@@ -127,6 +164,9 @@ def _compute_cell(
         for i, name in enumerate(AB_OUTCOME_NAMES)
     }
 
+    # Projected slash line from the same outcome distribution (aggregate stats).
+    obp, slg, ops = _slash_line(outcome_dist)
+
     # Natural pitch-type propensity → modal type + its π̂ → trust flag.
     pi_type = r.intervention_type_propensity
     modal_type_idx = int(np.argmax(pi_type))
@@ -141,6 +181,9 @@ def _compute_cell(
         "predicted_rv_p95": p95,
         "predicted_top1_outcome": AB_OUTCOME_NAMES[top1_idx],
         "predicted_outcome_dist": outcome_dist,
+        "predicted_obp": obp,
+        "predicted_slg": slg,
+        "predicted_ops": ops,
         "modal_type": PITCH_TYPES[modal_type_idx],
         "p_hat_top_type": p_hat_top_type,
         "trust_state": trust_state,
