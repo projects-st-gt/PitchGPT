@@ -33,6 +33,7 @@ JSON is decoded into Python dicts on read; callers don't need to call
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -74,6 +75,24 @@ CREATE TABLE IF NOT EXISTS model_versions (
 
 def _now_utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _json_safe(obj):
+    """Recursively replace non-finite floats (NaN, +/-Inf) with None.
+
+    NaN run-values arise legitimately for all-truncated cells (debut/low-data
+    players whose rollout paths never terminate). Python's ``json`` emits these
+    as bare ``NaN``/``Infinity`` tokens, which are invalid JSON and rejected by
+    strict parsers (notably JavaScript ``JSON.parse`` in the frontend). Coercing
+    to ``null`` keeps the stored payload spec-valid; such cells read as "no value".
+    """
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_json_safe(v) for v in obj]
+    return obj
 
 
 def init_db(db_path: Path = DEFAULT_DB_PATH) -> sqlite3.Connection:
@@ -125,7 +144,13 @@ def write_prediction(
     if app not in ("matchup_card", "score_prediction"):
         raise ValueError(f"unknown app {app!r}; expected 'matchup_card' or 'score_prediction'")
     made_at = made_at or _now_utc_iso()
-    payload_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    # allow_nan=False rejects bare NaN/Infinity (valid in Python's json but not
+    # in the JSON spec — JS JSON.parse on the frontend chokes on them); _json_safe
+    # first coerces legitimate non-finite values (e.g. an all-truncated cell's run
+    # value) to null so the write succeeds and the cell reads as "no value".
+    payload_json = json.dumps(
+        _json_safe(payload), sort_keys=True, separators=(",", ":"), allow_nan=False
+    )
     cur = conn.execute(
         """
         INSERT INTO predictions

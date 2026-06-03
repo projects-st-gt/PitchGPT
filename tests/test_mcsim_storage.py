@@ -179,3 +179,32 @@ def test_register_model_version_idempotent(tmp_path: Path):
     assert got["label"] == "v7"  # second call did NOT overwrite
     rows = conn.execute("SELECT COUNT(*) FROM model_versions").fetchone()
     assert int(rows[0]) == 1
+
+
+def test_write_prediction_sanitizes_non_finite_to_null(tmp_path: Path):
+    """Non-finite floats (NaN/Inf — e.g. an all-truncated cell's run value)
+    must be stored as JSON null, not bare ``NaN``/``Infinity`` (invalid JSON
+    that strict parsers like JS ``JSON.parse`` reject). Frontend reads this
+    payload, so the stored text must be spec-valid."""
+    import json as _json
+
+    conn = init_db(tmp_path / "nan.sqlite")
+    payload = {"rows": [{"cell": {"rv": float("nan"),
+                                  "p95": float("inf"),
+                                  "p05": float("-inf"),
+                                  "ok": 0.5}}]}
+    write_prediction(conn, game_pk=7, prediction_date="2026-06-03",
+                     app="matchup_card", payload=payload, model_ckpt_hash="h")
+
+    raw = conn.execute(
+        "SELECT payload_json FROM predictions WHERE game_pk=7"
+    ).fetchone()[0]
+    assert "NaN" not in raw and "Infinity" not in raw  # spec-valid JSON text
+
+    cell = _json.loads(raw)["rows"][0]["cell"]
+    assert cell["rv"] is None and cell["p95"] is None and cell["p05"] is None
+    assert cell["ok"] == 0.5  # finite values untouched
+
+    got = read_prediction(conn, game_pk=7, prediction_date="2026-06-03",
+                          app="matchup_card")
+    assert got["payload"]["rows"][0]["cell"]["rv"] is None
