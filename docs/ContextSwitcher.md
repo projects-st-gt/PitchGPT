@@ -6,8 +6,9 @@
 
 On branch **`mcsim-runner-mp`** (NOT merged yet), bundling the "run it for real" work:
 - ✅ **Game-level multiprocessing** added to the runner (`--n-workers`; each worker = 1 game at torch threads=1; flat thread-scaling makes this win). Smoke: 2 games/2 workers ~2× concurrency. Committed + unit-tested.
-- 🔄 **LIVE PREDICTION RUN IN PROGRESS** (background task): `--date 2026-06-04 --n-workers 9 --n-paths 250 --rng-seed 1` → 9 games → `data/mcsim.sqlite`. ETA ~1.9h from 14:08. When done: verify rows landed (`read_predictions_for_date(conn, prediction_date="2026-06-04", app="matchup_card")`).
-- ✅ **MCSim frontend tab MVP** built (`frontend/src/MCSimTab.tsx` + tab wired in `App.tsx` + `/mcsim` API client in `api.ts` + types). `tsc -b` clean. **Visual verification PENDING** — once the run lands, `make demo` and open the "Matchup cards" tab on date 2026-06-04 to screenshot/verify.
+- ✅ **Live-progress logging added** (`compute_matchup_card(progress_every=)` + runner `--progress-every`, default 25). The first n_paths=250 run was opaque (no per-game logging) and ran slow under 9-way contention; killed it and re-ran WITH logging.
+- ✅ **PREDICTION RUN DONE for 2026-06-04**: `--n-workers 9 --n-paths 120 --rng-seed 1` → **9/9 cards, 338 cells each, in `data/mcsim.sqlite`** (78 min wall, fully visible via streamed progress). NOTE: n_paths=**120** (not 250) — re-run at higher quality later if desired. Verified via the `/mcsim` API: OPS populated + discriminating (median RV flat at −0.100, as expected). Many 06-04 games had no probable announced → `is_starter=False` (cosmetic).
+- ✅ **MCSim frontend tab MVP** built (`frontend/src/MCSimTab.tsx` + tab in `App.tsx` + `/mcsim` client in `api.ts` + types). `tsc -b` clean; **data path verified** through the API. **Browser visual verification STILL PENDING** — `make demo`, open "Matchup cards" tab on date 2026-06-04.
 
 **Next after the run:**
 1. Verify frontend renders real 06-04 cards (dev server + screenshot).
