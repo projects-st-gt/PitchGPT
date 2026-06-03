@@ -27,6 +27,7 @@ runner).
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -215,6 +216,7 @@ def compute_matchup_card(
     n_paths: int = 1000,
     rng_seed: Optional[int] = None,
     context: Optional[ReferenceContext] = None,
+    progress_every: Optional[int] = None,
 ) -> dict:
     """Compute one game's matchup card.
 
@@ -236,6 +238,11 @@ def compute_matchup_card(
 
     rows: list[dict] = []
     cell_index = 0
+    # Progress reporting: a game is one long silent unit otherwise (~338 cells).
+    total_cells = (
+        len(home_pitchers) * len(away_lineup) + len(away_pitchers) * len(home_lineup)
+    )
+    _t0 = time.perf_counter()
 
     # (team, pitchers, opposing_lineup, their own catcher) for each half of the grid.
     half_grids = [
@@ -264,6 +271,15 @@ def compute_matchup_card(
                     )
                 )
                 cell_index += 1
+                if progress_every and cell_index % progress_every == 0:
+                    elapsed = time.perf_counter() - _t0
+                    rate = elapsed / cell_index
+                    eta = rate * (total_cells - cell_index)
+                    print(
+                        f"[game {game_pk}] {cell_index}/{total_cells} cells "
+                        f"({elapsed:.0f}s elapsed, ~{eta:.0f}s left)",
+                        flush=True,
+                    )
             rows.append({
                 "pitcher_id": pitcher.id,
                 "name": pitcher.name,

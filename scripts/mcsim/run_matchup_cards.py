@@ -44,7 +44,7 @@ def compute_ckpt_hash(ckpt_path: Path, *, n_chars: int = 16) -> str:
     return h.hexdigest()[:n_chars]
 
 
-def _compute_one_game(nuisance, game, date: str, n_paths: int, rng_seed):
+def _compute_one_game(nuisance, game, date: str, n_paths: int, rng_seed, progress_every=None):
     """Fetch both rosters for one game and compute its all-vs-all card.
 
     Shared by the sequential and parallel paths so they produce identical
@@ -66,6 +66,7 @@ def _compute_one_game(nuisance, game, date: str, n_paths: int, rng_seed):
         away_lineup=away_h,
         n_paths=n_paths,
         rng_seed=rng_seed,
+        progress_every=progress_every,
     )
 
 
@@ -87,9 +88,10 @@ def _init_worker(ckpt_path_str: str) -> None:
 
 
 def _worker_compute_game(task):
-    game, date, n_paths, rng_seed = task
+    game, date, n_paths, rng_seed, progress_every = task
     try:
-        card = _compute_one_game(_WORKER_NUISANCE, game, date, n_paths, rng_seed)
+        card = _compute_one_game(
+            _WORKER_NUISANCE, game, date, n_paths, rng_seed, progress_every=progress_every)
         return (game.game_pk, game.away_team, game.home_team, card, None)
     except Exception:
         return (game.game_pk, game.away_team, game.home_team, None, traceback.format_exc())
@@ -108,6 +110,7 @@ def run_matchup_cards(
     max_games: "int | None" = None,
     n_workers: int = 1,
     ckpt_path: "Path | None" = None,
+    progress_every: "int | None" = None,
 ) -> list[dict]:
     """Fetch the schedule for ``date``, compute one all-vs-all matchup card per
     game, and (unless dry_run) persist it. Returns the list of card payloads.
@@ -142,7 +145,7 @@ def run_matchup_cards(
         import multiprocessing as mp
 
         ctx = mp.get_context("spawn")
-        tasks = [(g, date, n_paths, rng_seed) for g in games]
+        tasks = [(g, date, n_paths, rng_seed, progress_every) for g in games]
         print(f"parallel: {len(tasks)} games across {n_workers} workers (1 torch thread each)")
         with ctx.Pool(processes=n_workers, initializer=_init_worker,
                       initargs=(str(ckpt_path),)) as pool:
@@ -157,7 +160,8 @@ def run_matchup_cards(
 
     for g in games:
         try:
-            card = _compute_one_game(nuisance, g, date, n_paths, rng_seed)
+            card = _compute_one_game(nuisance, g, date, n_paths, rng_seed,
+                                     progress_every=progress_every)
             _persist_and_log(g.game_pk, g.away_team, g.home_team, card)
             cards.append(card)
         except Exception as e:  # one bad game must not abort the batch
@@ -182,6 +186,8 @@ def main() -> None:
     ap.add_argument("--n-workers", type=int, default=1,
                     help="games to run in parallel (each worker loads its own model "
                          "at 1 torch thread; >1 needs the checkpoint on disk)")
+    ap.add_argument("--progress-every", type=int, default=25,
+                    help="print a per-game cell-progress line every N cells (0 to silence)")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
@@ -204,6 +210,7 @@ def main() -> None:
         max_games=args.max_games,
         n_workers=args.n_workers,
         ckpt_path=args.ckpt,
+        progress_every=(args.progress_every or None),
     )
     print(f"done: {len(cards)} card(s) for {args.date}")
 
