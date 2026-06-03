@@ -101,3 +101,18 @@ def test_get_active_roster_no_probable(monkeypatch):
     monkeypatch.setattr(mlb_api, "_get_json", lambda url, **kw: _ROSTER_JSON)
     pitchers, _ = mlb_api.get_active_roster(139, "2026-06-02")
     assert all(p.is_starter is False for p in pitchers)
+
+
+def test_get_active_roster_skips_malformed_entry(monkeypatch):
+    j = {"roster": [
+        {"position": {"type": "Pitcher"},
+         "person": {"id": 111, "fullName": "Good P",
+                    "pitchHand": {"code": "R"}, "batSide": {"code": "R"}}},
+        {"person": {"id": 999}},  # malformed — no "position"
+        {"position": {"type": "Outfielder"},
+         "person": {"fullName": "No ID"}},  # malformed — person has no "id"
+    ]}
+    monkeypatch.setattr(mlb_api, "_get_json", lambda url, **kw: j)
+    pitchers, hitters = mlb_api.get_active_roster(1, "2026-06-02")
+    assert [p.id for p in pitchers] == [111]   # good pitcher kept
+    assert hitters == []                        # both malformed entries skipped

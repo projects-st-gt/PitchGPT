@@ -79,21 +79,26 @@ def get_active_roster(
     pitchers: list[PitcherSpec] = []
     hitters: list[BatterSpec] = []
     for entry in data.get("roster", []):
-        person = entry.get("person", {})
-        pid = int(person["id"])
-        name = person.get("fullName", str(pid))
-        if entry["position"]["type"] == "Pitcher":
-            throws = (person.get("pitchHand") or {}).get("code", "R")
-            pitchers.append(PitcherSpec(
-                id=pid,
-                name=name,
-                throws=throws if throws in ("R", "L") else "R",
-                is_starter=(probable_pitcher_id is not None
-                            and pid == probable_pitcher_id),
-            ))
-        else:
-            stand = _resolve_stand((person.get("batSide") or {}).get("code", "R"))
-            hitters.append(BatterSpec(id=pid, name=name, stand=stand))
+        try:
+            person = entry.get("person", {})
+            pid = int(person["id"])
+            name = person.get("fullName", str(pid))
+            if entry["position"]["type"] == "Pitcher":
+                throws = (person.get("pitchHand") or {}).get("code", "R")
+                pitchers.append(PitcherSpec(
+                    id=pid,
+                    name=name,
+                    throws=throws if throws in ("R", "L") else "R",
+                    is_starter=(probable_pitcher_id is not None
+                                and pid == probable_pitcher_id),
+                ))
+            else:
+                stand = _resolve_stand((person.get("batSide") or {}).get("code", "R"))
+                hitters.append(BatterSpec(id=pid, name=name, stand=stand))
+        except KeyError as e:
+            print(f"[mlb_api] skipping malformed roster entry "
+                  f"(team {team_id}): missing key {e}", file=sys.stderr)
+            continue
     return pitchers, hitters
 
 
