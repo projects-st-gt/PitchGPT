@@ -8,11 +8,13 @@ This is the handoff doc for a new Claude session (or a VS Code restart). Read it
 
 ## TL;DR — where to resume
 
-You are in the middle of building **MCSim App B (pre-game matchup card)** on branch `mcsim-app-b-matchup-card`. Six commits in. Step 4 (the matchup-card computer) just landed. Next concrete step:
+You are building **MCSim App B (pre-game matchup card)** on branch `mcsim-app-b-matchup-card`. **Steps 4, 5, AND 6 are done** (Step 6 was merged into Step 5 — live MLB-API runner). The runner has been validated end-to-end on a real game. Next concrete step:
 
-> **Implement `scripts/mcsim/run_matchup_cards.py`** — the end-to-end CLI runner that takes a date + game_pk list, calls `compute_matchup_card`, and persists each card via `storage.write_prediction`. This is the first place the storage layer and the card computer meet.
+> **Step 7 — post-game actuals fetcher.** Pull the real final score + matchup events for a past game date from the MLB Stats API and write them via `storage.write_actual` (two-pass COALESCE upsert) so predictions can be overlaid with what actually happened.
 
-See "Next concrete step" section below for the precise contract.
+Possible perf detour first (optional): **multiprocessing in the runner** — the measured all-vs-all wall-clock makes a 15-game nightly batch at n_paths=250 ~20.7h single-process (see "Step 5+6 results" below). Not blocking Step 7.
+
+See sections below for details.
 
 ---
 
@@ -21,10 +23,11 @@ See "Next concrete step" section below for the precise contract.
 Continuing App B v1 backend (~3 more focused days):
 
 1. ~~**Step 4 — `mcsim/matchup_card.py`**~~ ✅ done (commit `67f0629`)
-2. **Step 5 — CLI runner** (`scripts/mcsim/run_matchup_cards.py`) ← next
-3. **Step 6 — MLB Stats API client** (`scripts/mcsim/mlbstats.py` — schedule, probable pitchers, lineups, bullpen days-rest)
-4. **Step 7 — Post-game actuals fetcher**
+2. ~~**Step 5 — CLI runner** (`scripts/mcsim/run_matchup_cards.py`)~~ ✅ done
+3. ~~**Step 6 — MLB Stats API client**~~ ✅ done — MERGED into Step 5 as `mcsim/mlb_api.py` (schedule + active-roster; lineups dropped in favour of all-vs-all roster grid)
+4. **Step 7 — Post-game actuals fetcher** ← next (`storage.write_actual`)
 5. **Step 8 — Read API endpoints** (`GET /mcsim/predictions?date=...`, `GET /mcsim/predictions/{game_pk}`)
+6. (perf, optional) Runner multiprocessing — needed for a full 15-game nightly batch at n_paths=250
 
 After App B v1 lands: App A (daily score prediction) needs a multi-AB state machine. MCSim brainstorm doc has design notes; that's a separate substantial project.
 
@@ -154,6 +157,29 @@ end-to-end works").**
   league-mean profile (principled degrade, not fabrication).
 - Switch hitters (`batSide=='S'`) resolve to `'L'` in v1 (vs the more common RHP);
   per-pitcher resolution deferred (would need `compute_matchup_card` to vary stand).
+
+---
+
+## Step 5+6 results (DONE — validated on a real game 2026-06-03)
+
+Implemented via subagent-driven TDD (plan: `docs/superpowers/plans/2026-06-02-mcsim-appB-step5-live-runner.md`). Commits on branch:
+- `mcsim/mlb_api.py` — `get_schedule` + `get_active_roster` (+ malformed-item hardening on both). Tests: `tests/test_mcsim_mlb_api.py` (7).
+- `scripts/mcsim/run_matchup_cards.py` — `compute_ckpt_hash`, `run_matchup_cards`, `main` CLI. Tests: `tests/test_mcsim_run_matchup_cards.py` (3: hash, real-model E2E, fast skip-path).
+- **Full suite: 356 passed.**
+
+**Live validation:** `python -m scripts.mcsim.run_matchup_cards --date 2026-06-03 --game-pk 822727 --n-paths 40` → Marlins @ Nationals, **338 cells written to `data/mcsim.sqlite`**, ckpt hash `e67bd67d65a988dd`. Named numbers (row 0, Andrew Alvarez LHP, is_starter=True): vs Christopher Morel median RV −0.1000 (p05 −0.15, p95 +1.40), top1=out, modal FF π̂=0.305, trust=green, 0/40 trunc. All 338 cells green.
+
+**Wall-clock (measured 794.81s / 338 cells @ n_paths=40 = 2.35 s/cell, linear):**
+
+| n_paths | min/game | 15 games single-proc | 15 games 8-core mp |
+|---|---|---|---|
+| 40 | 13.2 | 3.3h | 0.4h |
+| 100 | 33.1 | 8.3h | 1.0h |
+| 250 (default) | 82.8 | **20.7h (infeasible)** | 2.6h |
+
+→ For a real 15-game nightly batch at n_paths=250, **multiprocessing is required** (or drop n_paths). Functionally the runner is complete; this is a perf follow-up, not a correctness gap.
+
+**Honest finding — median RV is a weak cross-cell discriminator.** It pinned to −0.1000 for every cell (when >50% of paths end in "out", the median path IS an out → median = out's run value). Batter signal lives in the tails (p05/p95) and the outcome distribution, NOT the median. **Frontend (Step 8+) should headline mean RV or P(reaches base), not median.**
 
 ---
 
