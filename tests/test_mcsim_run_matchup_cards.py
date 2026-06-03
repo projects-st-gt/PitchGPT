@@ -113,3 +113,36 @@ def test_run_matchup_cards_skips_failing_game(monkeypatch, capsys):
     out, err = capsys.readouterr()
     assert "SKIP game_pk=1" in out and "SKIP game_pk=2" in out
     assert "RuntimeError: roster fetch failed" in err  # traceback surfaced to stderr
+
+
+def test_run_matchup_cards_parallel_requires_ckpt(monkeypatch):
+    """n_workers>1 needs a ckpt_path (workers load their own model)."""
+    monkeypatch.setattr(runner, "get_schedule", lambda date: [])
+    with pytest.raises(ValueError, match="ckpt_path"):
+        runner.run_matchup_cards(None, None, date="2026-06-04", game_pks=None,
+                                 n_paths=10, rng_seed=0, model_ckpt_hash="h",
+                                 n_workers=2, ckpt_path=None)
+
+
+def test_compute_one_game_fetches_both_rosters(monkeypatch):
+    """_compute_one_game fetches home then away roster and forwards them to
+    compute_matchup_card with the game's metadata (no model/network)."""
+    from mcsim.mlb_api import GameInfo
+
+    fetched = []
+    monkeypatch.setattr(
+        runner, "get_active_roster",
+        lambda team_id, date, probable_pitcher_id=None: (fetched.append(team_id) or ([], [])),
+    )
+    captured = {}
+    monkeypatch.setattr(
+        runner, "compute_matchup_card",
+        lambda nuisance, **kw: (captured.update(kw) or {"n_cells": 0, "rows": []}),
+    )
+    g = GameInfo(1, 10, 20, "Home", "Away", 111, 222)
+    card = runner._compute_one_game("FAKE_NZ", g, "2026-06-04", n_paths=5, rng_seed=3)
+    assert fetched == [10, 20]  # home then away
+    assert captured["game_pk"] == 1 and captured["home_team"] == "Home"
+    assert captured["away_team"] == "Away"
+    assert captured["n_paths"] == 5 and captured["rng_seed"] == 3
+    assert card["n_cells"] == 0
