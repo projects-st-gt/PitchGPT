@@ -43,3 +43,20 @@ def test_get_schedule_handles_missing_probable(monkeypatch):
     g = mlb_api.get_schedule("2026-06-02")[0]
     assert g.home_probable_pitcher_id is None
     assert g.away_probable_pitcher_id is None
+
+
+def test_get_schedule_skips_malformed_game(monkeypatch):
+    j = {"dates": [{"games": [
+        {"gamePk": 1, "teams": {  # good
+            "home": {"team": {"id": 10, "name": "H"}},
+            "away": {"team": {"id": 20, "name": "A"}}}},
+        {"gamePk": 2},  # malformed — no "teams"
+    ]}]}
+    monkeypatch.setattr(mlb_api, "_get_json", lambda url, **kw: j)
+    games = mlb_api.get_schedule("2026-06-02")
+    assert [g.game_pk for g in games] == [1]  # malformed game skipped, batch survives
+
+
+def test_get_schedule_empty_returns_empty(monkeypatch):
+    monkeypatch.setattr(mlb_api, "_get_json", lambda url, **kw: {"dates": []})
+    assert mlb_api.get_schedule("2026-06-02") == []

@@ -16,6 +16,7 @@ not just react to one.
 from __future__ import annotations
 
 import json
+import sys
 import urllib.request
 from dataclasses import dataclass
 from typing import Optional
@@ -55,15 +56,20 @@ def get_schedule(date: str) -> list[GameInfo]:
     games: list[GameInfo] = []
     for d in data.get("dates", []):
         for g in d.get("games", []):
-            home = g["teams"]["home"]
-            away = g["teams"]["away"]
-            games.append(GameInfo(
-                game_pk=int(g["gamePk"]),
-                home_team_id=int(home["team"]["id"]),
-                away_team_id=int(away["team"]["id"]),
-                home_team=home["team"]["name"],
-                away_team=away["team"]["name"],
-                home_probable_pitcher_id=_opt_id(home.get("probablePitcher")),
-                away_probable_pitcher_id=_opt_id(away.get("probablePitcher")),
-            ))
+            try:
+                home = g["teams"]["home"]
+                away = g["teams"]["away"]
+                games.append(GameInfo(
+                    game_pk=int(g["gamePk"]),
+                    home_team_id=int(home["team"]["id"]),
+                    away_team_id=int(away["team"]["id"]),
+                    home_team=home["team"]["name"],
+                    away_team=away["team"]["name"],
+                    home_probable_pitcher_id=_opt_id(home.get("probablePitcher")),
+                    away_probable_pitcher_id=_opt_id(away.get("probablePitcher")),
+                ))
+            except KeyError as e:
+                print(f"[mlb_api] skipping malformed game "
+                      f"{g.get('gamePk', '?')}: missing key {e}", file=sys.stderr)
+                continue
     return games
