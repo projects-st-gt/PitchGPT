@@ -1,6 +1,23 @@
 # ContextSwitcher — Pick up where this session left off
 
-**Last updated**: 2026-06-01, mid-implementation of MCSim App B (pre-game matchup card). Step 4 (matchup-card computer) is done, tested, committed, and pushed. Step 5 (CLI runner) is next.
+**Last updated**: 2026-06-03 — GO-LIVE SPRINT in progress.
+
+## GO-LIVE SPRINT status (2026-06-03) — read this first
+
+On branch **`mcsim-runner-mp`** (NOT merged yet), bundling the "run it for real" work:
+- ✅ **Game-level multiprocessing** added to the runner (`--n-workers`; each worker = 1 game at torch threads=1; flat thread-scaling makes this win). Smoke: 2 games/2 workers ~2× concurrency. Committed + unit-tested.
+- 🔄 **LIVE PREDICTION RUN IN PROGRESS** (background task): `--date 2026-06-04 --n-workers 9 --n-paths 250 --rng-seed 1` → 9 games → `data/mcsim.sqlite`. ETA ~1.9h from 14:08. When done: verify rows landed (`read_predictions_for_date(conn, prediction_date="2026-06-04", app="matchup_card")`).
+- ✅ **MCSim frontend tab MVP** built (`frontend/src/MCSimTab.tsx` + tab wired in `App.tsx` + `/mcsim` API client in `api.ts` + types). `tsc -b` clean. **Visual verification PENDING** — once the run lands, `make demo` and open the "Matchup cards" tab on date 2026-06-04 to screenshot/verify.
+
+**Next after the run:**
+1. Verify frontend renders real 06-04 cards (dev server + screenshot).
+2. **2026-06-05:** `python -m scripts.mcsim.fetch_actuals --date 2026-06-04` → actuals overlay appears in the tab.
+3. **Calibration eval** (not started): pool real PAs → reliability diagram/ECE; calibration-check OPS magnitude. Needs actuals (06-05) or backfilled past games. The card predicts in NEUTRAL context but real PAs vary — calibration must context-match (re-run model per real PA) or restrict to neutral-context PAs.
+4. Merge `mcsim-runner-mp` → main + push.
+
+---
+
+(historical) Step 4 done 2026-06-01; everything below predates the go-live sprint.
 
 This is the handoff doc for a new Claude session (or a VS Code restart). Read it cold; the project state below is everything you need to keep going.
 
