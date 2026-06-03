@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { getABContext, listAtBats, listGames, postQuery } from "./api";
+import MCSimTab from "./MCSimTab";
 import PitcherProfileTab from "./PitcherProfileTab";
 import RolloutViewerTab from "./RolloutViewerTab";
 import { ScoreboardHeader } from "./Scoreboard";
@@ -873,13 +874,14 @@ function CounterfactualExplorer() {
 // sprints add tabs 2-5. The switcher is intentionally minimal — no router yet.
 // ============================================================
 
-type TopTab = "counterfactual" | "pitcher_profile" | "rollout_viewer";
+type TopTab = "counterfactual" | "pitcher_profile" | "rollout_viewer" | "mcsim";
 
 function TabSwitcher({ tab, onChange }: { tab: TopTab; onChange: (t: TopTab) => void }) {
   const tabs: { id: TopTab; label: string }[] = [
     { id: "counterfactual", label: "Counterfactual explorer" },
     { id: "rollout_viewer", label: "AB rollout viewer" },
     { id: "pitcher_profile", label: "Pitcher profile" },
+    { id: "mcsim", label: "Matchup cards" },
   ];
   return (
     <nav className="border-b border-gray-200 mb-8">
@@ -922,6 +924,7 @@ export default function App() {
           <PitcherProfileTab />
         </div>
       )}
+      {tab === "mcsim" && <MCSimTab />}
     </>
   );
 }

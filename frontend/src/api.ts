@@ -79,3 +79,24 @@ export async function getPitcherProfile(
   if (!res.ok) throw new Error(`/pitcher/profile: ${res.status} ${await res.text()}`);
   return res.json();
 }
+
+// ---- MCSim App B (matchup cards) ----
+
+export async function listMcsimPredictions(
+  date: string,
+): Promise<import("./types").McsimPredictionsForDate> {
+  const res = await fetch(`${API_BASE}/mcsim/predictions?date=${encodeURIComponent(date)}`);
+  if (!res.ok) throw new Error(`/mcsim/predictions: ${res.status} ${await res.text()}`);
+  return res.json();
+}
+
+export async function getMcsimCard(
+  gamePk: number,
+  date: string,
+): Promise<import("./types").McsimCardResponse> {
+  const res = await fetch(
+    `${API_BASE}/mcsim/predictions/${gamePk}?date=${encodeURIComponent(date)}`,
+  );
+  if (!res.ok) throw new Error(`/mcsim/predictions/${gamePk}: ${res.status} ${await res.text()}`);
+  return res.json();
+}

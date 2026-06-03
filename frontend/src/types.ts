@@ -306,3 +306,90 @@ export function isOOZ(zone: number): boolean {
 export function oozQuadrantOf(zone: number): OOZQuadrant | null {
   return FEATURE_ZONE_TO_OOZ_QUADRANT[zone] ?? null;
 }
+
+// ============================================================
+// MCSim App B — matchup-card predictions + actuals overlay
+// (backend: inference/mcsim_api.py)
+// ============================================================
+
+export interface McsimPredictionSummary {
+  game_pk: number;
+  prediction_date: string;
+  home_team: string | null;
+  away_team: string | null;
+  made_at: string | null;
+  n_cells: number | null;
+  has_actual: boolean;
+}
+
+export interface McsimPredictionsForDate {
+  date: string;
+  count: number;
+  predictions: McsimPredictionSummary[];
+}
+
+export interface McsimActualEvent {
+  pitcher_id: number;
+  batter_id: number;
+  inning: number | null;
+  half: string | null;
+  event: string | null;
+  event_type: string | null;
+  runs_scored: number | null;
+  pitch_types: string[];
+  bases_start: string[];
+  outs_start: number | null;
+}
+
+export interface McsimCell {
+  batter_id: number;
+  batter_name: string;
+  predicted_rv_median: number | null;
+  predicted_rv_p05: number | null;
+  predicted_rv_p95: number | null;
+  predicted_top1_outcome: ABOutcome;
+  predicted_outcome_dist: Record<ABOutcome, number>;
+  predicted_obp?: number | null;
+  predicted_slg?: number | null;
+  predicted_ops?: number | null;
+  modal_type: PitchType;
+  p_hat_top_type: number;
+  trust_state: TrustState;
+  n_paths: number;
+  n_truncated: number;
+  actual?: { pa_count: number; events: McsimActualEvent[] } | null;
+}
+
+export interface McsimRow {
+  pitcher_id: number;
+  name: string;
+  team: string;
+  throws: string;
+  is_starter: boolean;
+  cells: McsimCell[];
+}
+
+export interface McsimCard {
+  game_pk: number;
+  game_date: string;
+  home_team: string;
+  away_team: string;
+  starter_home: { pitcher_id: number; name: string } | null;
+  starter_away: { pitcher_id: number; name: string } | null;
+  rows: McsimRow[];
+  n_cells: number;
+  n_paths_per_cell: number;
+}
+
+export interface McsimCardResponse {
+  game_pk: number;
+  prediction_date: string;
+  made_at: string | null;
+  model_ckpt_hash: string | null;
+  has_actual: boolean;
+  final_score_home: number | null;
+  final_score_away: number | null;
+  winner: string | null;
+  unmatched_event_count: number;
+  card: McsimCard;
+}

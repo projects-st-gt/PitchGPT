@@ -1,0 +1,377 @@
+import { useEffect, useMemo, useState } from "react";
+
+import { getMcsimCard, listMcsimPredictions } from "./api";
+import { PitchGlyph } from "./shared/ui";
+import type {
+  McsimCard,
+  McsimCardResponse,
+  McsimCell,
+  McsimPredictionSummary,
+  McsimRow,
+  PitchType,
+} from "./types";
+
+// Headline metric is projected OPS (a stronger cross-cell discriminator than
+// median run value, which pins to the out-value when most paths are outs).
+// Tint cells cool (pitcher-favorable) -> white (~league avg) -> warm (hitter).
+function opsTint(ops: number | null | undefined): string {
+  if (ops == null) return "transparent";
+  const lo = 0.4;
+  const hi = 1.1;
+  const mid = 0.7;
+  if (ops <= mid) {
+    const a = (((mid - ops) / (mid - lo)) * 0.35).toFixed(3);
+    return `rgba(74,144,217,${a})`; // --accent-cool
+  }
+  const a = (((ops - mid) / (hi - mid)) * 0.35).toFixed(3);
+  return `rgba(255,107,53,${a})`; // --accent
+}
+
+function reachedBase(eventType: string | null): boolean {
+  if (!eventType) return false;
+  return ["single", "double", "triple", "home_run", "walk", "hit_by_pitch"].includes(
+    eventType,
+  );
+}
+
+function lastName(name: string): string {
+  const parts = name.trim().split(/\s+/);
+  return parts.length > 1 ? parts[parts.length - 1] : name;
+}
+
+function CellButton({
+  cell,
+  selected,
+  onClick,
+}: {
+  cell: McsimCell;
+  selected: boolean;
+  onClick: () => void;
+}) {
+  const ops = cell.predicted_ops;
+  const acted = cell.actual && cell.actual.pa_count > 0 ? cell.actual : null;
+  return (
+    <button
+      onClick={onClick}
+      style={{ backgroundColor: opsTint(ops) }}
+      className={[
+        "relative w-full h-12 px-1 flex flex-col items-center justify-center gap-0.5 border-r border-b border-gray-100 transition-state",
+        selected ? "ring-2 ring-accent ring-inset" : "hover:brightness-95",
+      ].join(" ")}
+      title={`${cell.batter_name}: OPS ${ops != null ? ops.toFixed(3) : "n/a"}`}
+    >
+      <span className="text-small font-medium tabular-nums text-gray-900 leading-none">
+        {ops != null ? ops.toFixed(2) : "—"}
+      </span>
+      <span className="flex items-center gap-1 leading-none">
+        <PitchGlyph type={cell.modal_type as PitchType} dim />
+        {acted ? (
+          <span className="flex gap-0.5">
+            {acted.events.slice(0, 4).map((e, i) => (
+              <span
+                key={i}
+                className="inline-block w-1.5 h-1.5 rounded-full"
+                style={{
+                  backgroundColor: reachedBase(e.event_type) ? "#FF6B35" : "#86868B",
+                }}
+              />
+            ))}
+          </span>
+        ) : null}
+      </span>
+    </button>
+  );
+}
+
+function StaffGrid({
+  title,
+  rows,
+  selectedKey,
+  onSelect,
+}: {
+  title: string;
+  rows: McsimRow[];
+  selectedKey: string | null;
+  onSelect: (row: McsimRow, cell: McsimCell) => void;
+}) {
+  if (rows.length === 0) return null;
+  const hitters = rows[0].cells.map((c) => c.batter_name);
+  return (
+    <div className="mb-10">
+      <div className="text-data-label mb-2">{title}</div>
+      <div className="overflow-x-auto border border-gray-200 rounded-xl">
+        <table className="border-collapse min-w-full">
+          <thead>
+            <tr>
+              <th className="sticky left-0 z-10 bg-white text-left text-small font-medium text-gray-500 px-3 py-2 border-r border-b border-gray-200">
+                Pitcher
+              </th>
+              {hitters.map((h, i) => (
+                <th
+                  key={i}
+                  className="text-small font-medium text-gray-500 px-1 py-2 border-r border-b border-gray-200 whitespace-nowrap"
+                >
+                  {lastName(h)}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.pitcher_id}>
+                <td className="sticky left-0 z-10 bg-white text-small text-gray-900 px-3 py-1 border-r border-b border-gray-100 whitespace-nowrap">
+                  {row.is_starter ? <span className="text-accent mr-1">★</span> : null}
+                  {row.name}
+                  <span className="text-gray-400 ml-1">{row.throws}HP</span>
+                </td>
+                {row.cells.map((cell) => {
+                  const key = `${row.pitcher_id}:${cell.batter_id}`;
+                  return (
+                    <td key={cell.batter_id} className="p-0 w-16">
+                      <CellButton
+                        cell={cell}
+                        selected={selectedKey === key}
+                        onClick={() => onSelect(row, cell)}
+                      />
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function CellDetail({
+  row,
+  cell,
+}: {
+  row: McsimRow;
+  cell: McsimCell;
+}) {
+  const fmt = (v: number | null | undefined, d = 3) =>
+    v == null ? "—" : v.toFixed(d);
+  return (
+    <div className="bg-white border border-gray-200 rounded-xl p-6 shadow-card">
+      <div className="text-body font-medium text-gray-900 mb-4">
+        {row.is_starter ? <span className="text-accent mr-1">★</span> : null}
+        {row.name} <span className="text-gray-400">({row.throws}HP)</span> vs {cell.batter_name}
+      </div>
+      <div className="grid grid-cols-3 gap-4 mb-4">
+        <Metric label="Proj. OPS" value={fmt(cell.predicted_ops, 3)} />
+        <Metric label="Proj. OBP" value={fmt(cell.predicted_obp, 3)} />
+        <Metric label="Proj. SLG" value={fmt(cell.predicted_slg, 3)} />
+      </div>
+      <div className="text-small text-gray-500 mb-1">
+        Run value (median): <span className="tabular-nums text-gray-900">{fmt(cell.predicted_rv_median, 3)}</span>{" "}
+        <span className="text-gray-400">
+          ({fmt(cell.predicted_rv_p05, 2)} … {fmt(cell.predicted_rv_p95, 2)})
+        </span>
+      </div>
+      <div className="text-small text-gray-500 mb-1">
+        Most likely: <span className="text-gray-900">{cell.predicted_top1_outcome}</span> · modal pitch{" "}
+        <span className="inline-flex align-middle"><PitchGlyph type={cell.modal_type as PitchType} /></span>{" "}
+        at π̂ {cell.p_hat_top_type.toFixed(2)} · trust {cell.trust_state}
+      </div>
+      {cell.actual && cell.actual.pa_count > 0 ? (
+        <div className="mt-4 pt-4 border-t border-gray-200">
+          <div className="text-data-label mb-2">Actual ({cell.actual.pa_count} PA)</div>
+          {cell.actual.events.map((e, i) => (
+            <div key={i} className="text-small text-gray-900 mb-1">
+              inn {e.inning}
+              {e.half ? e.half[0] : ""} · <span className="font-medium">{e.event}</span>
+              {e.pitch_types.length ? (
+                <span className="text-gray-400"> · {e.pitch_types.join(" ")}</span>
+              ) : null}
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="mt-4 pt-4 border-t border-gray-200 text-small text-gray-400">
+          No plate appearance yet (game not played, or this matchup didn't occur).
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Metric({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <div className="text-data-label">{label}</div>
+      <div className="text-stat text-gray-900 tabular-nums" style={{ fontSize: "28px" }}>
+        {value}
+      </div>
+    </div>
+  );
+}
+
+export default function MCSimTab() {
+  const [date, setDate] = useState("2026-06-04");
+  const [list, setList] = useState<McsimPredictionSummary[] | null>(null);
+  const [loadingList, setLoadingList] = useState(false);
+  const [selectedPk, setSelectedPk] = useState<number | null>(null);
+  const [resp, setResp] = useState<McsimCardResponse | null>(null);
+  const [loadingCard, setLoadingCard] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [sel, setSel] = useState<{ row: McsimRow; cell: McsimCell } | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoadingList(true);
+    setError(null);
+    setList(null);
+    setSelectedPk(null);
+    setResp(null);
+    setSel(null);
+    listMcsimPredictions(date)
+      .then((r) => {
+        if (cancelled) return;
+        setList(r.predictions);
+        if (r.predictions.length > 0) setSelectedPk(r.predictions[0].game_pk);
+      })
+      .catch((e) => !cancelled && setError(String(e)))
+      .finally(() => !cancelled && setLoadingList(false));
+    return () => {
+      cancelled = true;
+    };
+  }, [date]);
+
+  useEffect(() => {
+    if (selectedPk == null) return;
+    let cancelled = false;
+    setLoadingCard(true);
+    setResp(null);
+    setSel(null);
+    getMcsimCard(selectedPk, date)
+      .then((r) => !cancelled && setResp(r))
+      .catch((e) => !cancelled && setError(String(e)))
+      .finally(() => !cancelled && setLoadingCard(false));
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedPk, date]);
+
+  const card: McsimCard | null = resp?.card ?? null;
+  const homeStaff = useMemo(
+    () => (card ? card.rows.filter((r) => r.team === card.home_team) : []),
+    [card],
+  );
+  const awayStaff = useMemo(
+    () => (card ? card.rows.filter((r) => r.team === card.away_team) : []),
+    [card],
+  );
+  const selectedKey = sel ? `${sel.row.pitcher_id}:${sel.cell.batter_id}` : null;
+
+  return (
+    <div className="max-w-6xl mx-auto px-6 py-8">
+      <div className="text-section mb-1">Matchup cards</div>
+      <p className="text-body text-gray-500 mb-6">
+        Pre-game scouting grid — every rostered pitcher against every opposing hitter, in a
+        neutral count. Cells show projected OPS (cool = pitcher-favorable, warm = hitter). Once a
+        game finishes, the real plate appearances are stamped on each cell.
+      </p>
+
+      <div className="flex items-center gap-3 mb-6">
+        <label className="text-data-label">Date</label>
+        <input
+          type="date"
+          value={date}
+          onChange={(e) => setDate(e.target.value)}
+          className="border border-gray-200 rounded-lg px-3 py-1.5 text-body"
+        />
+      </div>
+
+      {error ? <div className="text-small text-gauge-red mb-4">{error}</div> : null}
+      {loadingList ? <div className="text-small text-gray-400">Loading games…</div> : null}
+      {list && list.length === 0 ? (
+        <div className="text-body text-gray-400">No matchup cards stored for {date}.</div>
+      ) : null}
+
+      {list && list.length > 0 ? (
+        <div className="flex gap-2 overflow-x-auto pb-2 mb-8">
+          {list.map((g) => {
+            const active = g.game_pk === selectedPk;
+            return (
+              <button
+                key={g.game_pk}
+                onClick={() => setSelectedPk(g.game_pk)}
+                className={[
+                  "shrink-0 text-left px-4 py-3 rounded-xl border transition-state",
+                  active
+                    ? "border-accent bg-accent-subtle"
+                    : "border-gray-200 hover:border-gray-300",
+                ].join(" ")}
+              >
+                <div className="text-small font-medium text-gray-900 whitespace-nowrap">
+                  {g.away_team} @ {g.home_team}
+                </div>
+                <div className="text-small text-gray-400">
+                  {g.n_cells ?? "?"} cells {g.has_actual ? "· final" : ""}
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
+
+      {loadingCard ? <div className="text-small text-gray-400">Loading card…</div> : null}
+
+      {resp && card ? (
+        <>
+          {resp.has_actual ? (
+            <div className="bg-white border border-gray-200 rounded-xl p-4 mb-6 shadow-card">
+              <span className="text-data-label mr-3">Final</span>
+              <span className="text-body text-gray-900">
+                {card.away_team} {resp.final_score_away} — {resp.final_score_home} {card.home_team}
+              </span>
+              {resp.winner ? (
+                <span className="text-small text-gray-400 ml-3">
+                  ({resp.winner === "home" ? card.home_team : resp.winner === "away" ? card.away_team : "tie"})
+                </span>
+              ) : null}
+              {resp.unmatched_event_count > 0 ? (
+                <span className="text-small text-gray-400 ml-3">
+                  · {resp.unmatched_event_count} PA outside the roster grid
+                </span>
+              ) : null}
+            </div>
+          ) : (
+            <div className="text-small text-gray-400 mb-6">
+              Game not yet played — predictions only.
+            </div>
+          )}
+
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+            <div className="lg:col-span-2">
+              <StaffGrid
+                title={`${card.home_team} pitchers vs ${card.away_team} hitters`}
+                rows={homeStaff}
+                selectedKey={selectedKey}
+                onSelect={(row, cell) => setSel({ row, cell })}
+              />
+              <StaffGrid
+                title={`${card.away_team} pitchers vs ${card.home_team} hitters`}
+                rows={awayStaff}
+                selectedKey={selectedKey}
+                onSelect={(row, cell) => setSel({ row, cell })}
+              />
+            </div>
+            <div className="lg:col-span-1">
+              {sel ? (
+                <CellDetail row={sel.row} cell={sel.cell} />
+              ) : (
+                <div className="text-small text-gray-400">
+                  Select a cell to see the predicted distribution and what actually happened.
+                </div>
+              )}
+            </div>
+          </div>
+        </>
+      ) : null}
+    </div>
+  );
+}
