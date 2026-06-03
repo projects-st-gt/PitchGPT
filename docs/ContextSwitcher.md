@@ -8,11 +8,13 @@ This is the handoff doc for a new Claude session (or a VS Code restart). Read it
 
 ## TL;DR — where to resume
 
-**Steps 4, 5, AND 6 of MCSim App B are DONE and MERGED TO `main`** (branch `mcsim-app-b-matchup-card` was merged `--no-ff` at `a15f395` and deleted locally; `main` is ahead of `origin/main` by 21 commits — **unpushed** as of 2026-06-03). Step 6 was merged into Step 5 (live MLB-API runner). The runner was validated end-to-end on a real game. **Start Step 7 on a fresh branch off `main`.** Next concrete step:
+**MCSim App B Steps 4–6 are DONE + MERGED + PUSHED to `main`** (`origin/main` is current). **Step 7 (post-game actuals) is DONE on branch `mcsim-app-b-actuals`** (off `main`; 3 commits, NOT yet merged as of 2026-06-03). Step 6 was folded into Step 5 (live MLB-API runner). Both runner and actuals fetcher validated end-to-end on real games. **Next: merge `mcsim-app-b-actuals`, then start Step 8 (read API endpoints).** Next concrete step:
 
-> **Step 7 — post-game actuals fetcher.** Pull the real final score + matchup events for a past game date from the MLB Stats API and write them via `storage.write_actual` (two-pass COALESCE upsert) so predictions can be overlaid with what actually happened.
+> **Step 8 — read API endpoints.** `GET /mcsim/predictions?date=...` (date carousel) + `GET /mcsim/predictions/{game_pk}` (one card, with the actuals overlaid if the game has finished). Reads from `mcsim/storage.py`; mirrors the FastAPI patterns in `inference/api.py`.
 
-Possible perf detour first (optional): **multiprocessing in the runner** — the measured all-vs-all wall-clock makes a 15-game nightly batch at n_paths=250 ~20.7h single-process (see "Step 5+6 results" below). Not blocking Step 7.
+**Step 7 (done) — actuals layer.** `mcsim/mlb_actuals.py::get_game_actuals` parses the MLB live feed (`/api/v1.1/game/{pk}/feed/live`) → final score + winner + per-PA events (pitcher, batter, **start context: bases reconstructed from `runners[].movement.originBase`, outs from first pitch — NOT `matchup.splits.menOnBase`, which is a stat-split label and reports RISP for a leadoff hitter**, verified). `scripts/mcsim/fetch_actuals.py` is the CLI (per date, writes Final games via `storage.write_actual`; non-final skipped). Validated on game 777079 (Giants @ Jays 6–8, 75 PAs). Tests: `test_mcsim_mlb_actuals.py` (4) + `test_mcsim_fetch_actuals.py` (2).
+
+**Key validation insight (drives the future eval step):** a single matchup cell CANNOT be validated — a hitter faces a pitcher only 1–4 times per game. Validate by POOLING thousands of real PAs into a reliability diagram/ECE (calibration is the project's primary metric), and lean on the already-built per-pitch calibration. The 1000-path sim is Monte Carlo to smooth the model's distribution, not the thing being graded.
 
 See sections below for details.
 
@@ -25,9 +27,10 @@ Continuing App B v1 backend (~3 more focused days):
 1. ~~**Step 4 — `mcsim/matchup_card.py`**~~ ✅ done (commit `67f0629`)
 2. ~~**Step 5 — CLI runner** (`scripts/mcsim/run_matchup_cards.py`)~~ ✅ done
 3. ~~**Step 6 — MLB Stats API client**~~ ✅ done — MERGED into Step 5 as `mcsim/mlb_api.py` (schedule + active-roster; lineups dropped in favour of all-vs-all roster grid)
-4. **Step 7 — Post-game actuals fetcher** ← next (`storage.write_actual`)
-5. **Step 8 — Read API endpoints** (`GET /mcsim/predictions?date=...`, `GET /mcsim/predictions/{game_pk}`)
+4. ~~**Step 7 — Post-game actuals fetcher**~~ ✅ done — `mcsim/mlb_actuals.py` + `scripts/mcsim/fetch_actuals.py` (branch `mcsim-app-b-actuals`)
+5. **Step 8 — Read API endpoints** ← next (`GET /mcsim/predictions?date=...`, `GET /mcsim/predictions/{game_pk}`, + actuals overlay)
 6. (perf, optional) Runner multiprocessing — needed for a full 15-game nightly batch at n_paths=250
+7. (eval) Pooled per-PA calibration: reliability diagram/ECE over real PAs vs the model's per-matchup probabilities (context-matched). This is the real App-B validation — single cells can't be validated (1–4 real PAs each).
 
 After App B v1 lands: App A (daily score prediction) needs a multi-AB state machine. MCSim brainstorm doc has design notes; that's a separate substantial project.
 
