@@ -187,6 +187,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# MCSim App B read endpoints (predictions + actuals overlay). Read-only and
+# model-free — see inference/mcsim_api.py.
+from inference.mcsim_api import router as mcsim_router  # noqa: E402
+
+app.include_router(mcsim_router)
+
 
 # ============================================================
 # Helpers
