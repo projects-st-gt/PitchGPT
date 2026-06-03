@@ -88,3 +88,28 @@ def test_run_matchup_cards_end_to_end(tmp_path, monkeypatch, capsys):
           f"trust={first_cell['trust_state']}")
     captured = capsys.readouterr()
     assert "median RV" in captured.out
+
+
+def test_run_matchup_cards_skips_failing_game(monkeypatch, capsys):
+    """A game that errors mid-fetch is logged and skipped — it must not abort
+    the batch. Fast: roster fetch raises before the model is ever touched, so
+    no checkpoint/nuisance is needed (nuisance=None never gets used)."""
+    games = [
+        GameInfo(1, 10, 20, "H1", "A1", None, None),
+        GameInfo(2, 30, 40, "H2", "A2", None, None),
+    ]
+    monkeypatch.setattr(runner, "get_schedule", lambda date: games)
+
+    def _boom(team_id, date, probable_pitcher_id=None):
+        raise RuntimeError("roster fetch failed")
+
+    monkeypatch.setattr(runner, "get_active_roster", _boom)
+
+    cards = runner.run_matchup_cards(
+        None, None, date="2026-06-02", game_pks=None,
+        n_paths=1, rng_seed=0, model_ckpt_hash="h",
+    )
+    assert cards == []                       # both games skipped, no crash
+    out, err = capsys.readouterr()
+    assert "SKIP game_pk=1" in out and "SKIP game_pk=2" in out
+    assert "RuntimeError: roster fetch failed" in err  # traceback surfaced to stderr

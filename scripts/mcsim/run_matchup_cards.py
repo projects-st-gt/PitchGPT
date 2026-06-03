@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import sys
+import traceback
 from pathlib import Path
 
 import torch
@@ -100,7 +102,11 @@ def run_matchup_cards(
                   f"{card['n_cells']} cells"
                   f"{' (dry-run, not written)' if dry_run else ' written'}")
         except Exception as e:  # one bad game must not abort the batch
+            # Log the full traceback to stderr: the broad except also catches
+            # genuine bugs (a typo'd kwarg, a payload-key error), which would
+            # otherwise hide behind a one-line SKIP and silently zero the batch.
             print(f"  SKIP game_pk={g.game_pk}: {type(e).__name__}: {e}")
+            print(traceback.format_exc(), file=sys.stderr)
     return cards
 
 
