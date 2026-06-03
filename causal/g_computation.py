@@ -213,9 +213,9 @@ class RolloutResult:
 
     n_paths: int
     intervention_position: int
-    intervention_type: int
-    intervention_type_name: str
-    intervention_zone: Optional[int]   # 0..12 feature-zone (v5 SIS internal), or None for type-only
+    intervention_type: Optional[int]            # None when the rollout is natural (no intervention)
+    intervention_type_name: Optional[str]       # "FF", "SL", ... or None for natural rollouts
+    intervention_zone: Optional[int]            # 0..12 feature-zone (v5 SIS internal), or None for type-only
     max_steps: int
 
     # Per-path outputs, shape (N,)
@@ -233,6 +233,15 @@ class RolloutResult:
     n_truncated: int                     # paths that didn't terminate within max_steps
     intervention_velo_bin_mean: float    # mean sampled velo bin at the intervention
                                          # step across still-active paths (NaN if none)
+    intervention_type_propensity: np.ndarray  # π̂(type | h) at the intervention step,
+                                         # shape (7,) over PITCH_TYPES (1-indexed
+                                         # type_id − TYPE_ID_OFFSET). This is the exact
+                                         # distribution the rollout sampled the
+                                         # intervention pitch from — at k=0 every path
+                                         # shares the pre-intervention context, so it is
+                                         # a single well-defined propensity vector. Used
+                                         # by MCSim App B's matchup-card trust gate
+                                         # (predictive, not causal — see brainstorm doc).
 
     @property
     def ab_length_distribution(self) -> dict[int, int]:
@@ -247,8 +256,18 @@ class RolloutResult:
 # ============================================================
 
 
-def _resolve_intervention_type(intervention_type: int | str) -> tuple[int, str]:
-    """Returns (type_id_model_0indexed, type_name)."""
+def _resolve_intervention_type(
+    intervention_type: int | str | None,
+) -> tuple[Optional[int], Optional[str]]:
+    """Returns ``(type_id_model_0indexed, type_name)``.
+
+    ``intervention_type=None`` signals **natural mode** (ADR-013 / MCSim App B
+    D4): the rollout samples the pitch at the intervention position from
+    ``π̂(type | h)`` instead of clamping it. Both returns are ``None`` in
+    that case so downstream code can fall back to the sampling branch.
+    """
+    if intervention_type is None:
+        return None, None
     if isinstance(intervention_type, str):
         if intervention_type not in PITCH_TYPE_TO_ID:
             raise ValueError(
@@ -291,7 +310,7 @@ def g_compute(
     ab_pitches: pd.DataFrame,
     *,
     intervention_position: int,
-    intervention_type: int | str,
+    intervention_type: int | str | None = None,
     intervention_zone: Optional[int] = None,
     n_paths: int = 1000,
     max_steps: int = 12,
@@ -303,17 +322,33 @@ def g_compute(
     See the module docstring for the simulation rules. Outputs a
     :class:`RolloutResult` with per-path terminal steps + outcomes + run values
     and the aggregates a demo (or AIPW) would consume.
+
+    **Natural mode** (``intervention_type=None``, MCSim App B D4): instead of
+    clamping a specific pitch type at ``intervention_position``, sample the
+    type from ``π̂(type | history)`` per path. Downstream simulation rules
+    (count dynamics, result-head conditioning, AB termination) are unchanged.
+    Use this for matchup-card cells where the question is "what would this
+    pitcher naturally do?", not "what if he threw X?".
     """
-    if intervention_position < 1:
+    if intervention_position < 0:
         raise ValueError(
-            f"intervention_position must be ≥ 1 (the model doesn't autoregressively "
-            f"predict pitch[0] from no history). Got {intervention_position}."
+            f"intervention_position must be ≥ 0; got {intervention_position}."
         )
     if intervention_position >= len(ab_pitches):
         raise ValueError(
             f"intervention_position {intervention_position} ≥ AB length "
             f"{len(ab_pitches)}; pick an earlier position."
         )
+    # k=0 (intervene at first pitch / "fresh AB from 0-0") relies on the
+    # model's propensity at sequence index NC-1 — the last context-token
+    # position — for sampling pitch 0. That output is a function of the
+    # context tokens only (causal mask blocks attention from pitch positions
+    # to context tokens), so what's *at* pitch position 0 doesn't matter
+    # while we're sampling pitch 0. The caller still provides a 1-row
+    # ``ab_pitches`` DataFrame for the AB-level state lookups
+    # (count/runners/outs/pitcher_fatigue/spin_axis_fill at position k=0);
+    # the pitch-factor values at that row are overwritten by the sample.
+    # See MCSim App B brainstorm Decision D4 + Option C.
     if max_steps < intervention_position + 1:
         raise ValueError(
             f"max_steps {max_steps} must be > intervention_position {intervention_position}"
@@ -337,6 +372,8 @@ def g_compute(
 
     # Captured at the intervention step (see below).
     intervention_velo_bin_mean: float = float("nan")
+    # π̂(type | h) at the intervention step, shape (7,). Captured at step == k.
+    intervention_type_propensity: np.ndarray = np.full(N_PITCH_TYPES, np.nan)
 
     # --- Build batch + extract observed initial sequence -----------------------
     # build_single_ab_batch sets up the FULL observed AB replicated N times.
@@ -465,8 +502,26 @@ def g_compute(
         ]
         type_probs = type_probs / type_probs.sum(dim=-1, keepdim=True).clamp_min(1e-12)
 
-        # Sample type (with intervention clamp at step == k).
+        # Capture the natural type propensity π̂(type | h) at the intervention
+        # step. At step == k every path shares the identical pre-intervention
+        # history (positions 0..k-1 are the observed AB replicated N times), so
+        # all rows of ``type_probs`` are equal here — averaging over active
+        # paths yields the single propensity vector. This is the distribution
+        # the intervention pitch is sampled from in natural mode, and the gate
+        # input for MCSim App B's matchup-card trust flag.
         if step == k:
+            if active.any():
+                intervention_type_propensity = (
+                    type_probs.numpy()[active].mean(axis=0).astype(np.float64)
+                )
+            else:
+                intervention_type_propensity = np.full(N_PITCH_TYPES, np.nan)
+
+        # Sample type. At the intervention position (``step == k``):
+        #   - If an intervention type was specified, clamp every path to it.
+        #   - Natural mode (intervention_type_id is None) — fall through to the
+        #     normal sampling branch, which draws from π̂(type | h) per path.
+        if step == k and intervention_type_id is not None:
             sampled_type = np.full(N, intervention_type_id, dtype=np.int64)
         else:
             sampled_type = _sample_from_probs(type_probs, rng, active)
@@ -668,4 +723,5 @@ def g_compute(
         ab_outcome_distribution=outcome_dist,
         n_truncated=n_truncated,
         intervention_velo_bin_mean=intervention_velo_bin_mean,
+        intervention_type_propensity=intervention_type_propensity,
     )
