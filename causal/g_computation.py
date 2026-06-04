@@ -316,6 +316,8 @@ def g_compute(
     max_steps: int = 12,
     rng_seed: Optional[int] = None,
     run_value_table: np.ndarray = DEFAULT_AB_RUN_VALUE,
+    outcome_model: str = "head",
+    hitter_step_fn=None,
 ) -> RolloutResult:
     """Run the rigorous Monte Carlo g-computation rollout.
 
@@ -422,6 +424,10 @@ def g_compute(
     terminal_step = np.full(N, -1, dtype=np.int64)
     terminal_kind = np.full(N, TERMINAL_KIND_NOT_YET, dtype=np.int64)
     log_weights = []  # one (N,) per step
+    # outcome_model="hitter": each in-play path's cascade-sampled detailed outcome
+    # (index into [out,1B,2B,3B,HR]); used at terminal resolution in place of the
+    # transformer's ab_outcome head. pitchGPT still picks the pitches.
+    hitter_inplay = np.full(N, -1, dtype=np.int64)
 
     # The observed AB's runners/outs/pitcher_fatigue/pos are AB-level for our
     # MVP: runners/outs stay constant, pitcher_fatigue stays at obs bucket, pos
@@ -592,21 +598,49 @@ def g_compute(
         # spin_axis: use the placeholder; intended spin_axis matches.
         intended["spin_axis"][:, step, :] = full["spin_axis"][:, step, :]
 
-        # --- Forward AGAIN to read result probs at the just-filled step --------
-        # The previous forward used unfilled type/zone/velo at step → result
-        # head's read was on placeholders. Re-run with the sampled action.
-        batch_step["pitch_factors"]["type"] = full["type"][:, : step + 1]
-        batch_step["pitch_factors"]["zone"] = full["zone"][:, : step + 1]
-        batch_step["pitch_factors"]["velo"] = full["velo"][:, : step + 1]
-        batch_step["pitch_factors"]["spin_rate"] = full["spin_rate"][:, : step + 1]
-        batch_step["pitch_factors"]["spin_axis"] = full["spin_axis"][:, : step + 1, :]
-        batch_step["intended_actions"]["type"] = intended["type"][:, : step + 1]
-        batch_step["intended_actions"]["zone"] = intended["zone"][:, : step + 1]
-        batch_step["intended_actions"]["velo"] = intended["velo"][:, : step + 1]
-        batch_step["intended_actions"]["spin_axis"] = intended["spin_axis"][:, : step + 1, :]
-        out = nuisance.forward(batch_step)
-        result_probs_step = out.result_probs[:, step, :]  # (N, 7)
-        sampled_result = _sample_from_probs(result_probs_step, rng, active)
+        # --- Determine the pitch's result --------------------------------------
+        if outcome_model == "hitter":
+            # pitchGPT already picked the pitch (type/zone/velo above); the
+            # CASCADE decides the batter's response. hitter_step_fn bundles
+            # build_step_features -> cascade.predict_cascade -> the translator
+            # (cascade_to_result_probs). SEQUENCE is preserved: the previous
+            # pitch (step-1) is passed as the lag feature.
+            tids = full["type"][:, step].numpy()
+            zids = full["zone"][:, step].numpy()
+            ptids = (full["type"][:, step - 1].numpy() if step > 0
+                     else np.zeros(N, dtype=np.int64))
+            pzids = (full["zone"][:, step - 1].numpy() if step > 0
+                     else np.full(N, -1, dtype=np.int64))
+            nprev = np.full(N, step, dtype=np.int64)
+            rp_np, oc5 = hitter_step_fn(tids, zids, balls, strikes, ptids, pzids, nprev)
+            result_probs_step = torch.from_numpy(rp_np.astype(np.float32))
+            sampled_result = _sample_from_probs(result_probs_step, rng, active)
+            # record the detailed in-play outcome ([out,1B,2B,3B,HR]) for paths
+            # that just went in-play, sampled from the cascade's outcome5.
+            inplay_now = active & np.isin(
+                sampled_result,
+                [RESULT_IN_PLAY_OUT, RESULT_IN_PLAY_HIT, RESULT_IN_PLAY_HR],
+            )
+            for i in np.where(inplay_now)[0]:
+                p = oc5[i].astype(np.float64)
+                ssum = p.sum()
+                hitter_inplay[i] = int(rng.choice(5, p=p / ssum)) if ssum > 0 else 0
+        else:
+            # --- Forward AGAIN to read result probs at the just-filled step ----
+            # The previous forward used unfilled type/zone/velo at step → result
+            # head's read was on placeholders. Re-run with the sampled action.
+            batch_step["pitch_factors"]["type"] = full["type"][:, : step + 1]
+            batch_step["pitch_factors"]["zone"] = full["zone"][:, : step + 1]
+            batch_step["pitch_factors"]["velo"] = full["velo"][:, : step + 1]
+            batch_step["pitch_factors"]["spin_rate"] = full["spin_rate"][:, : step + 1]
+            batch_step["pitch_factors"]["spin_axis"] = full["spin_axis"][:, : step + 1, :]
+            batch_step["intended_actions"]["type"] = intended["type"][:, : step + 1]
+            batch_step["intended_actions"]["zone"] = intended["zone"][:, : step + 1]
+            batch_step["intended_actions"]["velo"] = intended["velo"][:, : step + 1]
+            batch_step["intended_actions"]["spin_axis"] = intended["spin_axis"][:, : step + 1, :]
+            out = nuisance.forward(batch_step)
+            result_probs_step = out.result_probs[:, step, :]  # (N, 7)
+            sampled_result = _sample_from_probs(result_probs_step, rng, active)
         full["result"][:, step] = torch.from_numpy(
             np.where(active, sampled_result + RESULT_ID_OFFSET, 0).astype(np.int64)
         )
@@ -636,7 +670,15 @@ def g_compute(
     # on the {1B, 2B, 3B, HR, out} sub-distribution. Read ab_outcome_per_pos at
     # each terminal step. We do ONE final forward to get the up-to-date probs.
     is_in_play = terminal_kind == TERMINAL_KIND_IN_PLAY
-    if is_in_play.any():
+    if outcome_model == "hitter":
+        # The cascade already sampled the detailed outcome at the in-play pitch
+        # (hitter_inplay ∈ {0..4} = [out,1B,2B,3B,HR]); map to AB_OUTCOME indices.
+        _OC5_TO_AB = np.array(
+            [AB_OUTCOME_OUT, AB_OUTCOME_NAMES.index("1B"), AB_OUTCOME_NAMES.index("2B"),
+             AB_OUTCOME_NAMES.index("3B"), AB_OUTCOME_NAMES.index("HR")], dtype=np.int64)
+        ip = np.where(is_in_play & (hitter_inplay >= 0))[0]
+        ab_outcome[ip] = _OC5_TO_AB[hitter_inplay[ip]]
+    elif is_in_play.any():
         # Forward on the final populated sequence to get ab_outcome at terminal step.
         # max_terminal_step bounds T; pad mask up to that.
         max_term = int(terminal_step[is_in_play].max() + 1)  # inclusive end
