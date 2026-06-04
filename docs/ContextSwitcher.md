@@ -390,3 +390,41 @@ ps aux | grep -E "build_profile_cache|build_matchup_cache|train_pitchgpt|run_mat
 ## End
 
 If anything in this doc contradicts something in the actual codebase, the codebase is right and this doc is stale. Update this doc at the end of every session that materially advances the project state.
+
+---
+
+## small-v7 training — PREPARED (2026-06-03), needs a GPU to run
+
+**Why:** tiny-v7 compresses hitter OPS ~6.8× on real data (real std 0.261 vs
+model 0.038, Pearson r=0.66) — it regresses every hitter toward ~.700. Step 1
+fix = more capacity (small: 6L/8H/d512, ~25M params vs tiny ~6M).
+
+**Validated command** (smoke-tested end-to-end on CPU, exit 0):
+```
+PYTHONPATH=. python -m scripts.train_pitchgpt \
+  --size small --fold 0 --type-conditioned-heads \
+  --epochs 3 --batch-size 256 --run-name small-fold0-v7
+```
+- `--type-conditioned-heads` = the v7 (ADR-013) change; arsenal_per_pitch +
+  propensity_situational are ON by default. (Optional, to fully match v7's EMD
+  loss: `--zone-spatial-weight <w>` — needs the zone-centroids file; verify
+  whether tiny-v7 used it before relying on it.)
+- **Device reality:** this Mac's only GPU path is MPS, which has the AB-outcome
+  gather miscompile (Issue #2) → training here would be WRONG (MPS) or far too
+  slow (CPU, ~25M params on 7M pitches). **Full run needs CUDA/Modal.** The
+  in-repo infra is `scripts/upload_to_modal.py` (upload only) — there is no Modal
+  *training* entrypoint checked in; launching the GPU run is a manual/Modal step.
+
+**After training:** `scripts.calibrate_pitchgpt` → `checkpoint_calibrated.pt`,
+then re-run the compression diagnostic (real-vs-model OPS spread) to see if
+capacity recovered the spread. If not → the dedicated hitter model
+(`docs/Hitter_Swing_Model.md`).
+
+## Hitter/swing model brainstorm — `docs/Hitter_Swing_Model.md`
+Structural fix for the hitter-compression problem. Key calls: decompose into
+swing→whiff→contact-quality nodes; compose a **tabular/tree** hitter model with
+the existing pitch transformer inside `g_compute` (behind an `outcome_model`
+flag); **a Transformer for the hitter model is most likely overkill** (batter
+response to one pitch is tabular, not a long-sequence problem) and a tree is far
+more interpretable (serves the interpretability project). Phased: small-v7 →
+tabular hitter model → wire into rollout + A/B → (only if needed) sequence-aware.
