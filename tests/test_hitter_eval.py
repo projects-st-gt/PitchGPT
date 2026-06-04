@@ -23,6 +23,31 @@ _HAVE_MODEL = Path("checkpoints/hitter/meta.json").exists()
 _HAVE_TEST = bool(sorted(Path("data/augmented/2024").glob("2024-07-2*.parquet")))
 
 
+def test_pa_outcome_class_maps_events():
+    from hitter.eval import pa_outcome_class
+    assert pa_outcome_class("single") == "1B"
+    assert pa_outcome_class("home_run") == "HR"
+    assert pa_outcome_class("walk") == "BB"
+    assert pa_outcome_class("strikeout") == "K"
+    assert pa_outcome_class("field_out") == "out"
+    assert pa_outcome_class("grounded_into_double_play") == "out"
+    assert pa_outcome_class("sac_fly") is None        # excluded from scoring vocab
+    assert pa_outcome_class("hit_by_pitch") is None
+
+
+def test_pa_logloss_rewards_probability_on_truth():
+    """Lower log-loss when the model puts more probability on what happened."""
+    from hitter.eval import pa_logloss
+    good = {"BB": .08, "K": .22, "out": .45, "1B": .15, "2B": .05, "3B": .005, "HR": .045}
+    # actual outcomes: mostly outs and a couple hits
+    actuals = ["out", "out", "1B", "K", "out"]
+    ll_good = pa_logloss([good] * 5, actuals)
+    flat = {k: 1 / 7 for k in good}
+    ll_flat = pa_logloss([flat] * 5, actuals)
+    assert ll_good < ll_flat                          # informed beats uniform
+    print(f"\nlogloss informed={ll_good:.3f} uniform={ll_flat:.3f}")
+
+
 def _pa_rows(batter, events):
     """One terminal pitch per PA for a batter (events = the PA result)."""
     return pd.DataFrame({

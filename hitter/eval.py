@@ -102,6 +102,43 @@ def held_out_node_metrics(
     return out
 
 
+#: Real `events` -> the 7-class PA outcome vocab (compose's TERMINALS). Outcomes
+#: outside the vocab (HBP, sac, interference) return None and are excluded from
+#: scoring (they're not things the cascade models in v0).
+_EVENT_TO_PA_CLASS = {
+    "single": "1B", "double": "2B", "triple": "3B", "home_run": "HR",
+    "walk": "BB", "intent_walk": "BB",
+    "strikeout": "K", "strikeout_double_play": "K",
+}
+_PA_VOCAB = ["BB", "K", "out", "1B", "2B", "3B", "HR"]
+_EXCLUDE_PA = {"hit_by_pitch", "sac_fly", "sac_bunt", "sac_fly_double_play",
+               "catcher_interf", "sac_bunt_double_play"}
+
+
+def pa_outcome_class(events: str) -> str | None:
+    """Map a real ``events`` value to the 7-class PA vocab, or None to exclude.
+
+    Hits/walks/Ks map directly; any other at-bat-ending event (field_out, GIDP,
+    fielders_choice, error, force_out, …) is an ``out``; HBP/sac/interference are
+    excluded (not in the cascade's v0 vocabulary).
+    """
+    if events in _EXCLUDE_PA:
+        return None
+    if events in _EVENT_TO_PA_CLASS:
+        return _EVENT_TO_PA_CLASS[events]
+    return "out"          # any other terminal event is an out
+
+
+def pa_logloss(pred_dists: list[dict], actuals: list[str]) -> float:
+    """Mean negative log-likelihood of the actual PA outcomes under the model's
+    predicted per-PA distributions (proper score; lower is better)."""
+    eps = 1e-9
+    tot = 0.0
+    for d, a in zip(pred_dists, actuals):
+        tot += -np.log(max(d.get(a, 0.0), eps))
+    return float(tot / len(actuals)) if actuals else float("nan")
+
+
 def select_batter_panel(
     real_ops: dict[int, dict | float],
     pa_by_batter: dict[int, int],
