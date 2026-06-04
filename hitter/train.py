@@ -24,6 +24,13 @@ Public surface:
 """
 from __future__ import annotations
 
+import os
+# XGBoost 3.x QuantileDMatrix construction has a nondeterministic libomp race on
+# macOS that SEGFAULTS under multithreading (flaky — same op crashes ~intermittently
+# at any data size). Force single-threaded OpenMP before xgboost is imported; the
+# trainer also passes n_jobs=1. One-time training cost; correctness > speed.
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+
 import glob
 from pathlib import Path
 
@@ -229,6 +236,81 @@ def build_training_frame(
     return df
 
 
+def prepare_node_features(
+    X: pd.DataFrame,
+    feature_names: list[str],
+    categorical: list[str],
+    cat_dtypes: dict,
+) -> pd.DataFrame:
+    """Coerce a feature frame to the dtypes XGBoost needs (shared by train+infer).
+
+    Non-categorical -> float32 (XGBoost 3.x SEGFAULTS on pandas nullable
+    Int64/Float64, which the augmented parquet uses; NaN preserved -> missing).
+    Categorical -> the train-fitted CategoricalDtype, with values unseen in train
+    nulled out first (-> NaN -> missing), since XGBoost native categorical
+    requires inference categories ⊆ train categories.
+    """
+    X = X[feature_names].copy()
+    for c in feature_names:
+        if c in categorical:
+            s = X[c].where(X[c].isin(cat_dtypes[c].categories))
+            X[c] = s.astype(cat_dtypes[c])
+        else:
+            X[c] = pd.to_numeric(X[c], errors="coerce").astype("float32")
+    return X
+
+
+def to_xgb_matrix(
+    X: pd.DataFrame,
+    feature_names: list[str],
+    categorical: list[str],
+    cat_dtypes: dict,
+) -> np.ndarray:
+    """Build a dense float32 matrix XGBoost can train/predict on WITHOUT segfault.
+
+    XGBoost 3.x's pandas *columnar* adapter segfaults at scale on macOS (the
+    `MakeEncColumnarBatch` path). Feeding a dense numpy array sidesteps it.
+    Categorical columns are encoded as their train-fitted integer codes (missing/
+    unseen -> NaN); pair with ``feature_types_for`` so XGBoost treats them as
+    categorical, not ordinal.
+    """
+    P = prepare_node_features(X, feature_names, categorical, cat_dtypes)
+    M = np.empty((len(P), len(feature_names)), dtype=np.float32)
+    cat_set = set(categorical)
+    for j, c in enumerate(feature_names):
+        if c in cat_set:
+            codes = P[c].cat.codes.to_numpy().astype(np.float32)
+            codes[codes < 0] = np.nan          # NaN/unseen code -1 -> missing
+            M[:, j] = codes
+        else:
+            M[:, j] = P[c].to_numpy(dtype=np.float32)
+    return M
+
+
+def feature_types_for(feature_names: list[str], categorical: list[str]) -> list[str]:
+    """XGBoost ``feature_types`` list: 'c' for categorical columns, 'q' otherwise."""
+    cat_set = set(categorical)
+    return ["c" if c in cat_set else "q" for c in feature_names]
+
+
+def predict_from_artifacts(artifacts: dict, X: pd.DataFrame) -> np.ndarray:
+    """Reproduce a node's calibrated prediction from its persisted artifacts.
+
+    ``artifacts`` is the dict ``save_models`` writes (booster, calibrator,
+    feature_names, categorical, cat_dtypes, objective). Binary -> isotonic-
+    calibrated P(positive); regression -> raw value.
+    """
+    M = to_xgb_matrix(
+        X, artifacts["feature_names"], artifacts["categorical"],
+        artifacts["cat_dtypes"],
+    )
+    booster = artifacts["booster"]
+    if artifacts["objective"] == "binary":
+        raw = booster.predict_proba(M)[:, 1]
+        return artifacts["calibrator"].transform(raw)
+    return booster.predict(M)
+
+
 def binary_ece(p: np.ndarray, y: np.ndarray, n_bins: int = 15) -> float:
     """Equal-mass ECE of a binary positive-class probability.
 
@@ -289,10 +371,11 @@ def train_node(
     from sklearn.isotonic import IsotonicRegression
     from sklearn.metrics import roc_auc_score, log_loss, mean_squared_error
 
-    # n_jobs=-1 SEGFAULTS on macOS (libomp double-load) when an eval_set builds a
-    # second DMatrix. Use a fixed positive thread count instead.
+    # Single-threaded by default: the macOS libomp race in QuantileDMatrix
+    # construction segfaults nondeterministically under any parallelism. n_jobs=1
+    # is the only race-free config (verified stable across repeated runs).
     if n_jobs is None:
-        n_jobs = min(8, max(1, (os.cpu_count() or 2) - 2))
+        n_jobs = 1
 
     categorical = categorical or []
     monotone = monotone or {}
@@ -307,29 +390,17 @@ def train_node(
         for c in categorical
     }
 
-    def _prep(X: pd.DataFrame) -> pd.DataFrame:
-        # Coerce to numpy dtypes: XGBoost 3.x SEGFAULTS on pandas nullable
-        # extension dtypes (Int64/Float64), which the augmented parquet uses.
-        # Non-categorical -> float32 (NaN preserved, handled natively);
-        # categorical -> the train-fitted CategoricalDtype (unseen -> NaN).
-        X = X[feature_names].copy()
-        for c in feature_names:
-            if c in categorical:
-                # null-out unseen-in-train values BEFORE astype (else pandas-4
-                # raises on out-of-dtype categories); unseen -> NaN -> missing.
-                s = X[c].where(X[c].isin(cat_dtypes[c].categories))
-                X[c] = s.astype(cat_dtypes[c])
-            else:
-                X[c] = pd.to_numeric(X[c], errors="coerce").astype("float32")
-        return X
+    def _mat(X: pd.DataFrame) -> np.ndarray:
+        return to_xgb_matrix(X, feature_names, categorical, cat_dtypes)
 
-    Xtr, Xva = _prep(X_train), _prep(X_val)
+    Xtr, Xva = _mat(X_train), _mat(X_val)
+    ftypes = feature_types_for(feature_names, categorical)
 
     common = dict(
         n_estimators=n_estimators, max_depth=max_depth,
         learning_rate=learning_rate, subsample=0.8, colsample_bytree=0.8,
         tree_method="hist", enable_categorical=bool(categorical),
-        monotone_constraints=cons, random_state=seed,
+        feature_types=ftypes, monotone_constraints=cons, random_state=seed,
         early_stopping_rounds=30, n_jobs=n_jobs,
     )
 
@@ -349,7 +420,7 @@ def train_node(
         metrics["base_rate"] = float(y_train.mean())
 
         def predict(X: pd.DataFrame) -> np.ndarray:
-            r = model.predict_proba(_prep(X))[:, 1]
+            r = model.predict_proba(_mat(X))[:, 1]
             return iso.transform(r)
 
         return {"booster": model, "calibrator": iso, "predict": predict,
@@ -368,7 +439,7 @@ def train_node(
         metrics["mean_target"] = float(y_train.mean())
 
         def predict(X: pd.DataFrame) -> np.ndarray:
-            return model.predict(_prep(X))
+            return model.predict(_mat(X))
 
         return {"booster": model, "calibrator": None, "predict": predict,
                 "metrics": metrics, "feature_names": feature_names,
