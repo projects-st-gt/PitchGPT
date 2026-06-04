@@ -512,20 +512,20 @@ and (later) full-game simulation (App A).
 ## What's DONE
 - `hitter/labels.py` ✅ — per-pitch swing/whiff/fair-contact + in-play outcome
   from `description`/`events`. Tested (swing 0.473, whiff-on-swing 0.248).
+- `hitter/features.py` ✅ — `build_base_features` (pitch+count+platoon+in_zone+
+  within-AB lags) and `attach_batter_profile` (per-(batter,game) ProfileCache
+  lookup, `as_of_fallback=True`, leakage-safe). Tested incl. real-data check that
+  different batters get different profile vectors. `BASE_FEATURE_COLS` exported.
 - `hitter/__init__.py`, `hitter/README.md`, `hitter/MODEL_DESIGN.md` ✅.
 
 ## Build steps (in order)
-1. **`hitter/features.py`** — per-pitch feature matrix. Base (type_id, plate_x,
-   plate_z, release_speed, balls, strikes, pitch_number, stand, p_throws) +
-   recent-pitch lags (prev type_id/result within AB; running per-type counts) +
-   **batter profile join**. Profile join convention (from
-   `model/pitchgpt_dataset.py:244`): per AB, `asof_date = first pitch game_date`,
-   `asof_game_num = first["game_num"] if present else 1`; call
-   `ProfileCache(role="batter", fold_id=...).lookup(batter_id, asof_date,
-   asof_game_num, as_of_fallback=True)` — do it once per (batter, game_pk) and
-   merge to pitches. Add pitcher "stuff" profile the same way. Derive in/out-of-
-   zone from plate_x/plate_z (zone ≈ |plate_x|<0.83 & sz_bot<plate_z<sz_top — or
-   reuse the pipeline's zone logic).
+1. ✅ **DONE — `hitter/features.py`** (see above). Profile-join convention used
+   (from `model/pitchgpt_dataset.py:244`): per AB `asof_date = first pitch
+   game_date`, `asof_game_num = first["game_num"] if present else 1`,
+   `ProfileCache(role="batter", fold_id=...).lookup(..., as_of_fallback=True)`.
+   TODO when wiring training: also attach the **pitcher "stuff" profile** the same
+   way (a `attach_pitcher_profile` mirror), and consider the finer 25-zone
+   encoding for interpretability plots.
 2. **`hitter/train.py`** — train the nodes (XGBoost), temporal split (train ≤2023,
    val 2024H1). Each node on its conditional population (swing=all; whiff=swings;
    fair=contact; contact-quality=balls-in-play). Monotonic constraints where
