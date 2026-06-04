@@ -19,6 +19,7 @@ from hitter.train import (
     attach_xwoba_target,
     attach_pitcher_profile,
     PITCHER_STUFF_FEATURES,
+    train_node,
 )
 
 
@@ -139,8 +140,118 @@ def test_pitcher_stuff_features_drops_heatmap_and_count_arsenal():
     assert 40 <= len(PITCHER_STUFF_FEATURES) <= 80
 
 
+def _synth_binary(n=4000, seed=0):
+    rng = np.random.default_rng(seed)
+    x1 = rng.normal(size=n)
+    x2 = rng.normal(size=n)
+    logit = 2.5 * x1 - 1.0 * x2
+    y = (rng.uniform(size=n) < 1 / (1 + np.exp(-logit))).astype(int)
+    X = pd.DataFrame({"x1": x1, "x2": x2})
+    return X, pd.Series(y)
+
+
+def test_train_node_binary_learns_and_calibrates():
+    Xtr, ytr = _synth_binary(seed=0)
+    Xva, yva = _synth_binary(seed=1)
+    res = train_node(Xtr, ytr, Xva, yva, objective="binary",
+                     feature_names=["x1", "x2"])
+    # learned signal
+    assert res["metrics"]["auc"] > 0.85
+    # isotonic calibration produced a calibrator + a sane ECE
+    assert res["calibrator"] is not None
+    assert res["metrics"]["ece"] < 0.06
+    # predict() returns calibrated probabilities in [0,1]
+    p = res["predict"](Xva)
+    assert p.min() >= 0.0 and p.max() <= 1.0
+    print(f"\n[binary] AUC={res['metrics']['auc']:.3f} "
+          f"logloss={res['metrics']['logloss']:.3f} ECE={res['metrics']['ece']:.3f}")
+
+
+def test_train_node_regression_learns():
+    rng = np.random.default_rng(0)
+    n = 4000
+    x1 = rng.normal(size=n)
+    y = 0.3 + 0.2 * x1 + rng.normal(scale=0.1, size=n)
+    X = pd.DataFrame({"x1": x1})
+    res = train_node(X.iloc[:3000], pd.Series(y[:3000]),
+                     X.iloc[3000:], pd.Series(y[3000:]),
+                     objective="regression", feature_names=["x1"])
+    assert res["metrics"]["pearson"] > 0.7
+    print(f"\n[reg] RMSE={res['metrics']['rmse']:.3f} r={res['metrics']['pearson']:.3f}")
+
+
+def test_train_node_categorical_handles_unseen_val_category():
+    """Val categories not present in train must not crash (the 2023-train /
+    2024-val reality): fit category set on train, unseen-in-val -> missing."""
+    Xtr, ytr = _synth_binary(seed=4)
+    Xva, yva = _synth_binary(seed=5)
+    # a categorical id col: train sees ids 0..9, val sees an unseen id 99
+    Xtr = Xtr.assign(cat_id=np.random.default_rng(0).integers(0, 10, len(Xtr)))
+    Xva = Xva.assign(cat_id=np.random.default_rng(1).integers(0, 10, len(Xva)))
+    Xva.iloc[0, Xva.columns.get_loc("cat_id")] = 99    # unseen in train
+    res = train_node(Xtr, ytr, Xva, yva, objective="binary",
+                     feature_names=["x1", "x2", "cat_id"], categorical=["cat_id"])
+    assert res["metrics"]["auc"] > 0.8
+    # predict on a frame with an unseen category also works
+    p = res["predict"](Xva)
+    assert len(p) == len(Xva) and p.min() >= 0 and p.max() <= 1
+
+
+def test_train_node_monotone_increasing_constraint_respected():
+    """With a +1 monotone constraint on x1, calibrated P must be non-decreasing
+    in x1 (holding nothing else — single feature)."""
+    Xtr, ytr = _synth_binary(seed=2)
+    Xva, yva = _synth_binary(seed=3)
+    res = train_node(Xtr[["x1"]], ytr, Xva[["x1"]], yva, objective="binary",
+                     feature_names=["x1"], monotone={"x1": 1})
+    grid = pd.DataFrame({"x1": np.linspace(-2, 2, 50)})
+    p = res["predict"](grid)
+    assert np.all(np.diff(p) >= -1e-6), "monotone +1 constraint violated"
+
+
 VAL = sorted(Path("data/augmented/2024").glob("2024-*.parquet"))
 requires_data = pytest.mark.skipif(not VAL, reason="no augmented val data")
+
+
+TRAIN23 = sorted(Path("data/augmented/2023").glob("2023-09-*.parquet"))
+RAW23 = sorted(Path("data/raw/2023").glob("2023-09-*.parquet"))
+requires_train = pytest.mark.skipif(
+    not (TRAIN23 and RAW23 and VAL), reason="needs 2023 aug+raw and 2024 val")
+
+
+@requires_train
+def test_build_training_frame_and_train_all_nodes_real_slice():
+    """End-to-end pipeline on a small real slice: build the feature frame, train
+    all 4 ML nodes + foul rates. Asserts structure + prints named per-node
+    numbers (CLAUDE.md discipline). Not the full train — a wiring check."""
+    from data.profile_cache_loader import ProfileCache
+    from hitter.train import (
+        build_training_frame, train_all_nodes, load_pitch_frame,
+        NODE_FEATURES, _BATTER_COLS, _PITCHER_COLS,
+    )
+    bcache = ProfileCache(role="batter", fold_id=0)
+    pcache = ProfileCache(role="pitcher", fold_id=0)
+    # use the real loader: a week of 2023-09 train, a week of 2024-04 val
+    # (raw alignment guaranteed; enough in-play rows for the S3 val population).
+    tr_aug, tr_raw = load_pitch_frame("2023-09-01", "2023-09-07")
+    va_aug, va_raw = load_pitch_frame("2024-04-01", "2024-04-07")
+
+    train_df = build_training_frame(tr_aug, tr_raw, bcache, pcache)
+    val_df = build_training_frame(va_aug, va_raw, bcache, pcache)
+    # profile cols present
+    assert all(c in train_df.columns for c in _BATTER_COLS)
+    assert all(c in train_df.columns for c in _PITCHER_COLS)
+    # xwOBA target joined for in-play rows
+    inplay = train_df[train_df["fair"] == 1]
+    assert inplay["estimated_woba_using_speedangle"].notna().mean() > 0.8
+
+    print(f"\ntrain rows={len(train_df):,} val rows={len(val_df):,}")
+    bundle = train_all_nodes(train_df, val_df, n_estimators=80)
+    assert set(bundle["nodes"]) == {"swing", "whiff", "called_strike",
+                                    "contact_quality"}
+    # the swing node should clear a trivial bar even on this tiny slice
+    assert bundle["nodes"]["swing"]["metrics"]["auc"] > 0.6
+    assert len(bundle["foul_rate_by_count"]) >= 8   # most of the 12 counts seen
 
 
 @requires_data

@@ -24,10 +24,18 @@ Public surface:
 """
 from __future__ import annotations
 
+import glob
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 
 from hitter import labels as L
+from hitter.features import (
+    BASE_FEATURE_COLS,
+    attach_batter_profile,
+    build_base_features,
+)
 
 # ---------------------------------------------------------------------------
 # Pitcher "stuff" feature subset (MODEL_DESIGN.md §5)
@@ -161,6 +169,215 @@ def foul_rate_by_count(df: pd.DataFrame) -> dict[tuple[int, int], float]:
     return rates
 
 
+# ---------------------------------------------------------------------------
+# Feature spec per node (MODEL_DESIGN.md §4-5): common stuff + node-specific
+# ---------------------------------------------------------------------------
+_BATTER_COLS = [f"b{i}" for i in range(57)]          # BATTER_VECTOR_LEN
+_PITCHER_COLS = [f"p{i}" for i in range(len(PITCHER_STUFF_FEATURES))]
+_MOVEMENT_COLS = ["release_spin_rate", "spin_axis_sin", "spin_axis_cos"]
+_COMMON_FEATURES = BASE_FEATURE_COLS + _MOVEMENT_COLS + ["outs_when_up"] \
+    + _BATTER_COLS + _PITCHER_COLS
+
+#: Per-node feature list. S1b (called_strike) is mostly location/umpire/framing —
+#: minimal batter signal; S3 (contact_quality) adds park/roof/temp (Coors carry).
+NODE_FEATURES: dict[str, list[str]] = {
+    "swing": _COMMON_FEATURES,
+    "whiff": _COMMON_FEATURES,
+    "called_strike": (BASE_FEATURE_COLS + ["umpire_id", "catcher_id"]
+                      + _BATTER_COLS),
+    "contact_quality": (_COMMON_FEATURES
+                        + ["ballpark_id", "roof_state", "temp_bucket"]),
+}
+#: High-cardinality id columns handled via XGBoost native categorical support.
+NODE_CATEGORICAL: dict[str, list[str]] = {
+    "swing": [],
+    "whiff": [],
+    "called_strike": ["umpire_id", "catcher_id"],
+    "contact_quality": ["ballpark_id", "roof_state", "temp_bucket"],
+}
+#: Monotone priors kept minimal + clean (forcing wrong ones hurts calibration).
+#: whiff never decreases with velo (chase-and-miss) — the one unambiguous prior.
+NODE_MONOTONE: dict[str, dict[str, int]] = {
+    "swing": {},
+    "whiff": {"release_speed": 1},
+    "called_strike": {},
+    "contact_quality": {},
+}
+NODE_OBJECTIVE = {
+    "swing": "binary", "whiff": "binary", "called_strike": "binary",
+    "contact_quality": "regression",
+}
+
+
+def build_training_frame(
+    pitches: pd.DataFrame,
+    raw: pd.DataFrame,
+    batter_cache,
+    pitcher_cache,
+) -> pd.DataFrame:
+    """Assemble the full per-pitch frame: cascade labels + base/lag features +
+    batter & pitcher profile joins + the S3 xwOBA target.
+
+    The single place where labels, features, and the two leakage-safe profile
+    joins meet. Downstream ``node_population`` slices this per node.
+    """
+    df = add_cascade_labels(pitches)
+    df = attach_xwoba_target(df, raw)
+    df = build_base_features(df)
+    df = attach_batter_profile(df, batter_cache, prefix="b")
+    df = attach_pitcher_profile(df, pitcher_cache, prefix="p")
+    return df
+
+
+def binary_ece(p: np.ndarray, y: np.ndarray, n_bins: int = 15) -> float:
+    """Equal-mass ECE of a binary positive-class probability.
+
+    Bin predictions ``p`` into ``n_bins`` equal-mass quantile bins; ECE is the
+    mass-weighted mean ``|mean_p - frac_positive|`` per bin. Equal-mass matches
+    the project convention (eval/metrics/calibration.py); binary here because the
+    cascade nodes emit one calibrated probability that gets multiplied into the
+    per-PA outcome — so that single number must be honest.
+    """
+    p = np.asarray(p, dtype=float)
+    y = np.asarray(y, dtype=float)
+    n = len(p)
+    if n == 0:
+        return float("nan")
+    edges = np.quantile(p, np.linspace(0.0, 1.0, n_bins + 1))
+    edges[0], edges[-1] = -1e-9, 1.0 + 1e-9
+    ece = 0.0
+    for i in range(n_bins):
+        m = (p >= edges[i]) & (p < edges[i + 1])
+        if m.any():
+            ece += (m.sum() / n) * abs(y[m].mean() - p[m].mean())
+    return float(ece)
+
+
+def train_node(
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+    X_val: pd.DataFrame,
+    y_val: pd.Series,
+    *,
+    objective: str,
+    feature_names: list[str],
+    monotone: dict[str, int] | None = None,
+    categorical: list[str] | None = None,
+    n_estimators: int = 500,
+    max_depth: int = 6,
+    learning_rate: float = 0.05,
+    seed: int = 0,
+    n_jobs: int | None = None,
+) -> dict:
+    """Fit one cascade node (XGBoost) + per-node isotonic calibration.
+
+    ``objective``: ``"binary"`` (swing/whiff/called-strike) or ``"regression"``
+    (contact-quality xwOBA). Binary nodes get isotonic calibration fit on the val
+    set — the cascade multiplies these probabilities, so each must be calibrated,
+    not just discriminative. Monotone constraints inject baseball priors
+    (chase↑ out-of-zone, whiff↑ velo, xwOBA↑ middle) and clean up the SHAP plots.
+
+    Returns ``{booster, calibrator, predict, metrics, feature_names, categorical}``
+    where ``predict(X)`` returns calibrated probabilities (binary) or values (reg).
+
+    NOTE: ECE is reported on the val set the isotonic map was fit on, so it is
+    mildly optimistic; eval.py recomputes calibration on the held-out test set.
+    """
+    import os
+
+    import xgboost as xgb
+    from sklearn.isotonic import IsotonicRegression
+    from sklearn.metrics import roc_auc_score, log_loss, mean_squared_error
+
+    # n_jobs=-1 SEGFAULTS on macOS (libomp double-load) when an eval_set builds a
+    # second DMatrix. Use a fixed positive thread count instead.
+    if n_jobs is None:
+        n_jobs = min(8, max(1, (os.cpu_count() or 2) - 2))
+
+    categorical = categorical or []
+    monotone = monotone or {}
+    cons = tuple(monotone.get(f, 0) for f in feature_names)
+
+    # Fit each categorical column's category set on TRAIN only. XGBoost native
+    # categorical requires eval/predict categories ⊆ train categories, so val
+    # ids unseen in train (2023-train vs 2024-val umpires/parks) must map to a
+    # shared dtype where unseen -> NaN (treated as missing), not a new category.
+    cat_dtypes = {
+        c: pd.CategoricalDtype(categories=pd.Index(X_train[c].dropna().unique()))
+        for c in categorical
+    }
+
+    def _prep(X: pd.DataFrame) -> pd.DataFrame:
+        # Coerce to numpy dtypes: XGBoost 3.x SEGFAULTS on pandas nullable
+        # extension dtypes (Int64/Float64), which the augmented parquet uses.
+        # Non-categorical -> float32 (NaN preserved, handled natively);
+        # categorical -> the train-fitted CategoricalDtype (unseen -> NaN).
+        X = X[feature_names].copy()
+        for c in feature_names:
+            if c in categorical:
+                # null-out unseen-in-train values BEFORE astype (else pandas-4
+                # raises on out-of-dtype categories); unseen -> NaN -> missing.
+                s = X[c].where(X[c].isin(cat_dtypes[c].categories))
+                X[c] = s.astype(cat_dtypes[c])
+            else:
+                X[c] = pd.to_numeric(X[c], errors="coerce").astype("float32")
+        return X
+
+    Xtr, Xva = _prep(X_train), _prep(X_val)
+
+    common = dict(
+        n_estimators=n_estimators, max_depth=max_depth,
+        learning_rate=learning_rate, subsample=0.8, colsample_bytree=0.8,
+        tree_method="hist", enable_categorical=bool(categorical),
+        monotone_constraints=cons, random_state=seed,
+        early_stopping_rounds=30, n_jobs=n_jobs,
+    )
+
+    metrics: dict[str, float] = {}
+    if objective == "binary":
+        model = xgb.XGBClassifier(objective="binary:logistic",
+                                  eval_metric="logloss", **common)
+        model.fit(Xtr, y_train, eval_set=[(Xva, y_val)], verbose=False)
+        raw_va = model.predict_proba(Xva)[:, 1]
+        iso = IsotonicRegression(out_of_bounds="clip")
+        iso.fit(raw_va, y_val.to_numpy())
+        cal_va = iso.transform(raw_va)
+        metrics["auc"] = float(roc_auc_score(y_val, cal_va))
+        metrics["logloss"] = float(log_loss(y_val, np.clip(cal_va, 1e-7, 1 - 1e-7)))
+        metrics["ece"] = binary_ece(cal_va, y_val.to_numpy())
+        metrics["n_train"] = int(len(y_train))
+        metrics["base_rate"] = float(y_train.mean())
+
+        def predict(X: pd.DataFrame) -> np.ndarray:
+            r = model.predict_proba(_prep(X))[:, 1]
+            return iso.transform(r)
+
+        return {"booster": model, "calibrator": iso, "predict": predict,
+                "metrics": metrics, "feature_names": feature_names,
+                "categorical": categorical, "cat_dtypes": cat_dtypes,
+                "objective": objective}
+
+    if objective == "regression":
+        model = xgb.XGBRegressor(objective="reg:squarederror",
+                                 eval_metric="rmse", **common)
+        model.fit(Xtr, y_train, eval_set=[(Xva, y_val)], verbose=False)
+        pred_va = model.predict(Xva)
+        metrics["rmse"] = float(np.sqrt(mean_squared_error(y_val, pred_va)))
+        metrics["pearson"] = float(np.corrcoef(pred_va, y_val.to_numpy())[0, 1])
+        metrics["n_train"] = int(len(y_train))
+        metrics["mean_target"] = float(y_train.mean())
+
+        def predict(X: pd.DataFrame) -> np.ndarray:
+            return model.predict(_prep(X))
+
+        return {"booster": model, "calibrator": None, "predict": predict,
+                "metrics": metrics, "feature_names": feature_names,
+                "categorical": categorical, "cat_dtypes": cat_dtypes,
+                "objective": objective}
+
+    raise ValueError(f"objective must be 'binary' or 'regression', got {objective!r}")
+
+
 def attach_xwoba_target(df: pd.DataFrame, raw: pd.DataFrame) -> pd.DataFrame:
     """Join ``estimated_woba_using_speedangle`` from a raw frame.
 
@@ -170,3 +387,154 @@ def attach_xwoba_target(df: pd.DataFrame, raw: pd.DataFrame) -> pd.DataFrame:
     keys = ["game_pk", "at_bat_number", "pitch_number"]
     cols = keys + ["estimated_woba_using_speedangle"]
     return df.merge(raw[cols], on=keys, how="left")
+
+
+# ---------------------------------------------------------------------------
+# Data loading + orchestration
+# ---------------------------------------------------------------------------
+
+def load_pitch_frame(
+    start: str,
+    end: str,
+    *,
+    augmented_dir: str = "data/augmented",
+    raw_dir: str = "data/raw",
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Load augmented pitches in [start, end] (inclusive, by date) + the matching
+    raw frame (for the xwOBA target). Returns ``(augmented, raw)``.
+
+    Per-day parquet layout ``{dir}/{year}/{date}.parquet`` (statcast-pipeline).
+    """
+    aug_files, raw_files = [], []
+    for year in range(int(start[:4]), int(end[:4]) + 1):
+        for f in sorted(glob.glob(f"{augmented_dir}/{year}/*.parquet")):
+            d = Path(f).stem
+            if start <= d <= end:
+                aug_files.append(f)
+        for f in sorted(glob.glob(f"{raw_dir}/{year}/*.parquet")):
+            d = Path(f).stem
+            if start <= d <= end:
+                raw_files.append(f)
+    if not aug_files:
+        raise FileNotFoundError(f"no augmented parquet in [{start}, {end}]")
+    aug = pd.concat((pd.read_parquet(f) for f in aug_files), ignore_index=True)
+    raw_cols = ["game_pk", "at_bat_number", "pitch_number",
+                "estimated_woba_using_speedangle"]
+    raw = pd.concat(
+        (pd.read_parquet(f, columns=raw_cols) for f in raw_files),
+        ignore_index=True,
+    )
+    return aug, raw
+
+
+def train_all_nodes(
+    train_df: pd.DataFrame,
+    val_df: pd.DataFrame,
+    *,
+    nodes: tuple[str, ...] = ML_NODES,
+    **node_kwargs,
+) -> dict:
+    """Train every ML node on its conditional population + the S2b foul constant.
+
+    ``train_df`` / ``val_df`` are full feature frames from ``build_training_frame``.
+    Returns ``{"nodes": {node: result}, "foul_rate_by_count": {...}}``.
+    """
+    results: dict[str, dict] = {}
+    for node in nodes:
+        Xtr, ytr = node_population(train_df, node)
+        Xva, yva = node_population(val_df, node)
+        res = train_node(
+            Xtr, ytr, Xva, yva,
+            objective=NODE_OBJECTIVE[node],
+            feature_names=NODE_FEATURES[node],
+            categorical=NODE_CATEGORICAL[node],
+            monotone=NODE_MONOTONE[node],
+            **node_kwargs,
+        )
+        results[node] = res
+        m = res["metrics"]
+        if NODE_OBJECTIVE[node] == "binary":
+            print(f"  [{node:15s}] n={m['n_train']:>8,} base={m['base_rate']:.3f} "
+                  f"AUC={m['auc']:.3f} logloss={m['logloss']:.3f} ECE={m['ece']:.3f}")
+        else:
+            print(f"  [{node:15s}] n={m['n_train']:>8,} mean={m['mean_target']:.3f} "
+                  f"RMSE={m['rmse']:.3f} r={m['pearson']:.3f}")
+    return {"nodes": results, "foul_rate_by_count": foul_rate_by_count(train_df)}
+
+
+def save_models(bundle: dict, out_dir: str = "checkpoints/hitter") -> None:
+    """Persist each node (booster + calibrator + feature spec) + foul rates.
+
+    The ``predict`` closure is dropped (not picklable); ``HitterModel`` rebuilds
+    it from the booster + calibrator at load time.
+    """
+    import json
+    import joblib
+
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    meta = {"nodes": {}, "foul_rate_by_count": {
+        f"{b},{s}": r for (b, s), r in bundle["foul_rate_by_count"].items()}}
+    for node, res in bundle["nodes"].items():
+        joblib.dump(
+            {k: res[k] for k in
+             ("booster", "calibrator", "feature_names", "categorical",
+              "cat_dtypes", "objective")},
+            out / f"{node}.joblib",
+        )
+        meta["nodes"][node] = {"objective": res["objective"],
+                               "metrics": res["metrics"]}
+    (out / "meta.json").write_text(json.dumps(meta, indent=2))
+    print(f"\nsaved {len(bundle['nodes'])} nodes + foul rates -> {out}/")
+
+
+def main(
+    *,
+    train_start: str = "2017-01-01",
+    train_end: str = "2023-12-31",
+    val_start: str = "2024-01-01",
+    val_end: str = "2024-07-15",
+    fold_id: int = 0,
+    out_dir: str = "checkpoints/hitter",
+    **node_kwargs,
+) -> dict:
+    """End-to-end: load -> build features -> train all nodes -> persist.
+
+    Temporal split per the hard rule (train ≤2023, val 2024H1). Profiles use a
+    fixed fold's cache; the trailing-window discipline makes the join leakage-safe
+    regardless of fold (it's not a cross-fit nuisance here).
+    """
+    from data.profile_cache_loader import ProfileCache
+
+    bcache = ProfileCache(role="batter", fold_id=fold_id)
+    pcache = ProfileCache(role="pitcher", fold_id=fold_id)
+
+    print(f"loading train [{train_start}..{train_end}] + val [{val_start}..{val_end}]")
+    tr_aug, tr_raw = load_pitch_frame(train_start, train_end)
+    va_aug, va_raw = load_pitch_frame(val_start, val_end)
+    print(f"  train pitches={len(tr_aug):,}  val pitches={len(va_aug):,}")
+
+    print("building feature frames (labels + base + profile joins)...")
+    train_df = build_training_frame(tr_aug, tr_raw, bcache, pcache)
+    val_df = build_training_frame(va_aug, va_raw, bcache, pcache)
+
+    print("training nodes:")
+    bundle = train_all_nodes(train_df, val_df, **node_kwargs)
+    save_models(bundle, out_dir)
+    return bundle
+
+
+if __name__ == "__main__":
+    import argparse
+
+    ap = argparse.ArgumentParser(description="Train the hitter/swing cascade")
+    ap.add_argument("--train-start", default="2017-01-01")
+    ap.add_argument("--train-end", default="2023-12-31")
+    ap.add_argument("--val-start", default="2024-01-01")
+    ap.add_argument("--val-end", default="2024-07-15")
+    ap.add_argument("--fold-id", type=int, default=0)
+    ap.add_argument("--out-dir", default="checkpoints/hitter")
+    args = ap.parse_args()
+    main(train_start=args.train_start, train_end=args.train_end,
+         val_start=args.val_start, val_end=args.val_end,
+         fold_id=args.fold_id, out_dir=args.out_dir)
