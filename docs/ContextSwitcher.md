@@ -2,6 +2,46 @@
 
 **Last updated**: 2026-06-03 (late) — hitter-model build handed off.
 
+## ⭐⭐⭐ HITTER MODEL — CALIBRATED + BEATS BASELINE (2026-06-04)
+
+**Per-PA backtest (the real "does it work" measure) now PASSES.** Cascade +
+empirical-lookup pitch source scores **1.405 log-loss vs 1.452 league-average
+baseline** on real held-out 2024H2 at-bats (lower=better). It was *worse* (1.460)
+until the calibration fix below.
+
+**KEY FIX — the xwOBA→outcome map must bin on PREDICTED xwOBA, not real.**
+contact_quality hedges to the mean (pred std ~0.08), so a real-binned map never
+fires its high bins → HR came out 5× too low (0.7% vs real 3.3%), singles too
+high. Predicted-binning fixes it (HR drift → 3.2% vs 3.3%). Reproducible via
+`python -m scripts.hitter.build_outcome_map`. **Re-run this whenever the
+contact_quality node is retrained.**
+
+**small-v7 capacity test (DONE, 3 epochs):** type_top1 0.485 (tiny-v7 0.478).
+Compression diagnostic (same panel/pitcher, controlled): tiny-v7 5.43×/r0.29,
+**small-v7 3.41×/r0.67**, **hitter cascade 2.62×/r0.90** (true-talent 1.37×/r0.94).
+Capacity helps spread magnitude but NOT ordering; cascade wins both. Plan:
+small-v7 = better π̂, cascade = μ̂. Calibrated ckpt at
+`checkpoints_modal/small-fold0-v7/checkpoint_calibrated.pt`.
+
+**contact_outcome multiclass head:** built + saved, but it slightly HURT OPS
+spread (2.62→2.81×); xwoba pinned as default `outcome_mode`. Multiclass stays an
+option (may help power calibration — untested vs the fixed map).
+
+**OPEN — wire the cards + the pitch-source test:**
+- `mcsim/matchup_card.py` still uses g_compute (transformer μ̂). To ship
+  cascade-based June 4 cards: add an analytic-compose path (`compose_pa` +
+  `build_empirical_pitch_provider`) + run `run_matchup_cards.py` (switch
+  DEFAULT_CKPT to small-v7) + publish to the running demo (:8000/:5173).
+- **Transformer-vs-empirical pitch-source backtest** (does pitchGPT's batter-aware
+  pitch selection beat the count-only lookup): empirical side done (1.405).
+  Transformer side blocked: pitchGPT conditions on count via pitch HISTORY, not a
+  settable count factor — clean per-count π̂ needs synthetic pitch histories or MC
+  rollout extraction (multi-hour). Honest caveat: the analytic engine is count-only
+  state, so it mutes sequence regardless of pitch source — count+last-pitch state
+  is the upgrade to let sequence show.
+
+---
+
 ## ⭐⭐ HITTER MODEL — STEPS 1-4 DONE, PASSES THE GATE (2026-06-03 late)
 
 **The dedicated hitter cascade works.** Compression diagnostic on held-out 2024H2
