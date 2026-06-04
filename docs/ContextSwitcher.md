@@ -1,8 +1,36 @@
 # ContextSwitcher — Pick up where this session left off
 
-**Last updated**: 2026-06-03 — GO-LIVE SPRINT in progress.
+**Last updated**: 2026-06-03 (late) — hitter-model build handed off.
 
-## GO-LIVE SPRINT status (2026-06-03) — read this first
+## ⭐ START HERE (current state — supersedes older sections below)
+
+- **Active branch: `hitter-swing-model`** (17 ahead of `main`). SUPERSET of
+  `mcsim-runner-mp`: contains ALL go-live work (multiprocessing, frontend MCSim
+  tab, **as-of profile fallback**, NaN→null fix, SQLite threading fix,
+  OPS/AVG/BB%/K% cells, progress logging) **plus** the hitter foundation. Keep
+  working here; nothing is merged to `main` yet.
+- **Active task: build the hitter/swing model** → see **"▶ NEW-SESSION HANDOFF"**
+  at the very BOTTOM of this file (authoritative step-by-step). Design:
+  `hitter/MODEL_DESIGN.md`, **APPROVED** — proceed with the §9 leans (xwOBA-on-
+  contact regression target; **analytic count-tree composition**, not
+  Monte-Carlo; fouls = count-constant in v0; continuous plate_x/z; 5 separate
+  XGBoost boosters).
+- **Done in `hitter/`:** `labels.py` ✅ + `features.py` ✅ (both tested; features
+  incl. the leakage-safe batter-profile join). Remaining: `train.py` →
+  `model.py` → `compose.py` → `eval.py` → wire into `causal/g_computation.py`
+  (`outcome_model` flag) → matchup-card path.
+- **Parallel:** `small-v7` on Modal (app `ap-55acWEObPHd29pPYMZibNh`, L4, ~10h) —
+  capacity test for the same compression problem. Pull/calibrate/re-diagnose
+  steps in the handoff.
+- **Acceptance test:** compression diagnostic — real vs model OPS spread.
+  Transformer = **6.8×** (real std 0.261 / model 0.038, r=0.66). Target ≈ **1×**.
+- **App A (full-game sim)** is unblocked: `compose.py`'s per-PA engine is its core.
+- Sections below ("GO-LIVE SPRINT", Steps 4–8) are HISTORICAL — App B backend is
+  done. Trust the handoff for what's live.
+
+---
+
+### (historical) GO-LIVE SPRINT status (2026-06-03) — read this first
 
 On branch **`mcsim-runner-mp`** (NOT merged yet), bundling the "run it for real" work:
 - ✅ **Game-level multiprocessing** added to the runner (`--n-workers`; each worker = 1 game at torch threads=1; flat thread-scaling makes this win). Smoke: 2 games/2 workers ~2× concurrency. Committed + unit-tested.
