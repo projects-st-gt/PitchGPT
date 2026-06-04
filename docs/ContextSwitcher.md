@@ -428,3 +428,38 @@ flag); **a Transformer for the hitter model is most likely overkill** (batter
 response to one pitch is tabular, not a long-sequence problem) and a tree is far
 more interpretable (serves the interpretability project). Phased: small-v7 →
 tabular hitter model → wire into rollout + A/B → (only if needed) sequence-aware.
+
+---
+
+## Hitter/swing model + small-v7 — IN FLIGHT (2026-06-03)
+
+**small-v7 training:** LAUNCHED on Modal, detached (app `ap-55acWEObPHd29pPYMZibNh`,
+`modal_app.py` train_remote, L4 GPU, `--size small --type-conditioned-heads
+--epochs 3 --run-name small-fold0-v7`, ~10h). Checkpoints land on the
+`pitchgpt-data` volume at `/data/checkpoints/small-fold0-v7/`. Pull when done:
+`modal volume get pitchgpt-data checkpoints/small-fold0-v7 ./checkpoints_modal/`,
+then `scripts.calibrate_pitchgpt`, then re-run the compression diagnostic.
+Motivation: tiny-v7 compresses hitter OPS **~6.8× on real data** (real std
+0.261 vs model 0.038, r=0.66) — capacity test.
+
+**Hitter/swing model:** branch `hitter-swing-model`, package `hitter/` (design:
+`docs/Hitter_Swing_Model.md`). Decision locked: **XGBoost** (spreadsheet-style,
+not a Transformer — a batter's response to one pitch is short-range; feed
+recent-pitch lag features instead of attention), composed with the pitch
+sequence model in `g_compute` behind an `outcome_model` flag.
+- ✅ `hitter/labels.py` — per-pitch swing/whiff/fair-contact + in-play outcome
+  from `description`/`events`. Validated (swing 0.473, whiff-on-swing 0.248).
+- TODO: `features.py` (pitch + count + **recent-pitch lags** + **batter profile
+  via ProfileCache** + pitcher) → `train.py` (3 nodes) → `model.py` predict →
+  `eval.py` (compression diagnostic, target spread-ratio ≈ 1× vs current 6.8×)
+  → wire into `g_compute` → UI tabs.
+- Baseline reality (repo's own leak-clean numbers): PitchGPT-small type top-1
+  **0.478** > leak-clean LSTM **0.449**; the "0.691 LSTM" was LEAKY. No saved
+  XGBoost number — building this produces it. (Transformer wins *pitch
+  prediction*; XGBoost's case for the *hitter* model is capacity-focus +
+  interpretability, NOT proven accuracy.)
+
+**Also still running:** demo servers (uvicorn :8000 `bizkpwz6m`, vite :5173
+`bilyl1h9s`) — the matchup-card tab. NOTE those cards are the n_paths=120
+2026-06-04 run that PREDATES the as-of profile fix, so they're player-blind;
+re-run a recent in-range date (≤2026-05-08) for meaningful cards.
