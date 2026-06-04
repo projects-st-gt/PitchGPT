@@ -463,3 +463,98 @@ sequence model in `g_compute` behind an `outcome_model` flag.
 `bilyl1h9s`) — the matchup-card tab. NOTE those cards are the n_paths=120
 2026-06-04 run that PREDATES the as-of profile fix, so they're player-blind;
 re-run a recent in-range date (≤2026-05-08) for meaningful cards.
+
+---
+
+# ▶ NEW-SESSION HANDOFF: build the hitter model + matchup cards (2026-06-03)
+
+Context ran low mid-build. Everything needed to finish is below. Branch:
+**`hitter-swing-model`**. Design is locked — read these 3 first:
+- `hitter/MODEL_DESIGN.md` — the multi-stage cascade, features, **analytic
+  count-tree composition** (no Monte-Carlo), open decisions (all have a "lean").
+- `docs/Hitter_Swing_Model.md` — rationale + the ~6.8× compression that motivates it.
+- This handoff.
+
+## The goal in one line
+A 3-model XGBoost cascade (swing → whiff → contact-quality) for the BATTER side,
+composed with PitchGPT (pitch side) over the count tree, to fix the ~6.8×
+hitter-OPS compression and power matchup cards / counterfactual / recommender —
+and (later) full-game simulation (App A).
+
+## What's DONE
+- `hitter/labels.py` ✅ — per-pitch swing/whiff/fair-contact + in-play outcome
+  from `description`/`events`. Tested (swing 0.473, whiff-on-swing 0.248).
+- `hitter/__init__.py`, `hitter/README.md`, `hitter/MODEL_DESIGN.md` ✅.
+
+## Build steps (in order)
+1. **`hitter/features.py`** — per-pitch feature matrix. Base (type_id, plate_x,
+   plate_z, release_speed, balls, strikes, pitch_number, stand, p_throws) +
+   recent-pitch lags (prev type_id/result within AB; running per-type counts) +
+   **batter profile join**. Profile join convention (from
+   `model/pitchgpt_dataset.py:244`): per AB, `asof_date = first pitch game_date`,
+   `asof_game_num = first["game_num"] if present else 1`; call
+   `ProfileCache(role="batter", fold_id=...).lookup(batter_id, asof_date,
+   asof_game_num, as_of_fallback=True)` — do it once per (batter, game_pk) and
+   merge to pitches. Add pitcher "stuff" profile the same way. Derive in/out-of-
+   zone from plate_x/plate_z (zone ≈ |plate_x|<0.83 & sz_bot<plate_z<sz_top — or
+   reuse the pipeline's zone logic).
+2. **`hitter/train.py`** — train the nodes (XGBoost), temporal split (train ≤2023,
+   val 2024H1). Each node on its conditional population (swing=all; whiff=swings;
+   fair=contact; contact-quality=balls-in-play). Monotonic constraints where
+   sensible (chase↑ out-of-zone; xwOBA↑ middle). Per-node isotonic calibration.
+   **S3 target = xwOBA-on-contact** (`estimated_woba_using_speedangle`) — NOT in
+   `data/augmented/`; join from `data/raw/{year}/{date}.parquet`. Fallback for v0:
+   discrete {1B/2B/3B/HR/out} from `events` (already in augmented). Save models to
+   `checkpoints/hitter/`.
+3. **`hitter/model.py`** — `HitterModel.predict(pitch_type, location, count,
+   batter_feats, pitcher_feats, ctx) -> {swing, whiff, fair, xwoba/outcome}`.
+   Loads the saved nodes; vectorized.
+4. **`hitter/compose.py`** — the **analytic count-tree solve**. State = (balls,
+   strikes[, last_pitch_type]). For each count, marginalize PitchGPT's
+   pitch(type+zone) distribution × the cascade → transition probs over
+   {ball, called/swing strike, foul (2-strike=no-op), in-play→out/1B/2B/3B/HR}.
+   Build the absorbing-Markov transition matrix; solve for terminal
+   distribution (walk, K, out, 1B, 2B, 3B, HR) in closed form → per-PA outcome →
+   OPS/AVG/OBP/SLG/K%/BB%. (Keep a Monte-Carlo path as a cross-check.)
+5. **`hitter/eval.py`** — THE acceptance test: the compression diagnostic
+   (real OPS spread vs model OPS spread across a batter panel; transformer = 6.8×;
+   target ≈ 1×). Plus per-node AUC/logloss/ECE, held-out hitters.
+6. **Wire into `causal/g_computation.py`** behind `outcome_model="head" | "hitter"`
+   — the cascade IS μ̂(y|do(pitch),h); keep π̂ from PitchGPT. AIPW/positivity/
+   E-values still apply.
+7. **Matchup cards** — `mcsim/matchup_card.py` gets an `outcome_model` /
+   `compose="analytic"|"mc"` option → per cell, run the analytic composition →
+   the existing payload (OPS/AVG/BB%/K% already shown in `frontend/src/MCSimTab.tsx`).
+   Re-run `scripts/mcsim/run_matchup_cards.py` (with multiprocessing) for a recent
+   IN-RANGE date (≤2026-05-08, so real profiles + actuals exist).
+
+## small-v7 (capacity test, running in PARALLEL)
+- Modal app `ap-55acWEObPHd29pPYMZibNh` (dashboard:
+  https://modal.com/apps/siddhartha-thakur/main — find the `pitchgpt` app), L4,
+  `--size small --type-conditioned-heads --epochs 3 --run-name small-fold0-v7`,
+  ~10h. Check: `modal app list`. When done:
+  `modal volume get pitchgpt-data checkpoints/small-fold0-v7 ./checkpoints_modal/`
+  → `python -m scripts.calibrate_pitchgpt --ckpt .../checkpoint.pt` →
+  re-run the compression diagnostic on it. If small-v7 recovers the hitter spread
+  on its own, the dedicated hitter model may be less urgent; if not, the hitter
+  model is the fix. (Either way the hitter model is the better long-term answer.)
+
+## App A (full future-game simulation) — yes, this unblocks it
+The per-PA outcome engine (steps 4–5) IS the core App A needs. A full game =
+chain PAs through a GAME state machine: lineup cycling (1–9), base-out state
+(use the RE24 / base-out tables in `data/run_value/`), inning/outs, score, both
+bullpens. Backtest on past games (predictions vs real finals — `mcsim` storage +
+`fetch_actuals` already exist) before predicting future games. App A is a
+separate `mcsim` module on top of the same PitchGPT+hitter engine.
+
+## The compression diagnostic (reuse verbatim as the gate)
+Real OPS per batter from held-out `events`; model OPS via the engine; compare
+spread (std) + Pearson r. Transformer baseline: real std 0.261 vs model 0.038
+(6.8×), r=0.66. Target for the hitter model: ratio ≈ 1×.
+
+## Misc state
+- Demo servers may still be running (uvicorn :8000, vite :5173). The 06-04 cards
+  in `data/mcsim.sqlite` are PLAYER-BLIND (predate the as-of fix) — re-run a
+  ≤2026-05-08 date for meaningful cards.
+- Unmerged branches: `mcsim-runner-mp` (mp + frontend + as-of fix + NaN fix + OPS
+  + logging — NOT merged to main), `hitter-swing-model` (this work).
