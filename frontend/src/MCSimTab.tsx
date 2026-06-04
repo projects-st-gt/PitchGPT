@@ -122,7 +122,7 @@ function StaffGrid({
     <div className="mb-10">
       <div className="text-data-label mb-2">{title}</div>
       <div className="overflow-x-auto border border-gray-200 rounded-xl">
-        <table className="border-collapse min-w-full">
+        <table className="border-collapse w-full">
           <thead>
             <tr>
               <th className="sticky left-0 z-10 bg-white text-left text-small font-medium text-gray-500 px-3 py-2 border-r border-b border-gray-200">
@@ -289,7 +289,7 @@ export default function MCSimTab() {
   const selectedKey = sel ? `${sel.row.pitcher_id}:${sel.cell.batter_id}` : null;
 
   return (
-    <div className="max-w-[1600px] mx-auto px-6 py-8">
+    <div className="w-full px-6 py-8">
       <div className="text-section mb-1">Matchup cards</div>
       <p className="text-body text-gray-500 mb-6">
         Pre-game scouting grid — every rostered pitcher against every opposing hitter, in a
@@ -367,31 +367,29 @@ export default function MCSimTab() {
             </div>
           )}
 
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-            <div className="lg:col-span-2">
-              <StaffGrid
-                title={`${card.home_team} pitchers vs ${card.away_team} hitters`}
-                rows={homeStaff}
-                selectedKey={selectedKey}
-                onSelect={(row, cell) => setSel({ row, cell })}
-              />
-              <StaffGrid
-                title={`${card.away_team} pitchers vs ${card.home_team} hitters`}
-                rows={awayStaff}
-                selectedKey={selectedKey}
-                onSelect={(row, cell) => setSel({ row, cell })}
-              />
+          {/* Grids use the full page width; the detail panel sits below so the
+              table isn't squeezed into a column. */}
+          <StaffGrid
+            title={`${card.home_team} pitchers vs ${card.away_team} hitters`}
+            rows={homeStaff}
+            selectedKey={selectedKey}
+            onSelect={(row, cell) => setSel({ row, cell })}
+          />
+          <StaffGrid
+            title={`${card.away_team} pitchers vs ${card.home_team} hitters`}
+            rows={awayStaff}
+            selectedKey={selectedKey}
+            onSelect={(row, cell) => setSel({ row, cell })}
+          />
+          {sel ? (
+            <div className="mt-4 max-w-xl">
+              <CellDetail row={sel.row} cell={sel.cell} />
             </div>
-            <div className="lg:col-span-1">
-              {sel ? (
-                <CellDetail row={sel.row} cell={sel.cell} />
-              ) : (
-                <div className="text-small text-gray-400">
-                  Select a cell to see the predicted distribution and what actually happened.
-                </div>
-              )}
+          ) : (
+            <div className="text-small text-gray-400 mt-2">
+              Select a cell to see the predicted distribution and what actually happened.
             </div>
-          </div>
+          )}
         </>
       ) : null}
     </div>
