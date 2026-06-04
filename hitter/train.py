@@ -216,6 +216,23 @@ NODE_OBJECTIVE = {
 }
 
 
+def build_inference_features(
+    pitches: pd.DataFrame,
+    batter_cache,
+    pitcher_cache,
+) -> pd.DataFrame:
+    """Assemble per-pitch FEATURES for prediction (no labels, no xwOBA target).
+
+    base/lag features + batter & pitcher profile joins — the same feature columns
+    the boosters were trained on (categorical ctx like umpire/park ride along from
+    the augmented rows). Used by the composition/matchup path.
+    """
+    df = build_base_features(pitches)
+    df = attach_batter_profile(df, batter_cache, prefix="b")
+    df = attach_pitcher_profile(df, pitcher_cache, prefix="p")
+    return df
+
+
 def build_training_frame(
     pitches: pd.DataFrame,
     raw: pd.DataFrame,

@@ -123,6 +123,90 @@ def select_batter_panel(
     return ranked[:n_each] + ranked[-n_each:]
 
 
+def build_empirical_pitch_provider(pitcher_pitches, target_batter_id,
+                                   batter_cache, pitcher_cache):
+    """π̂ provider for compose_pa: the reference pitcher's REAL pitches, grouped
+    by count, with the batter swapped to ``target_batter_id`` (so the batter
+    profile = target's). Counts the pitcher never threw fall back to his overall
+    pitch set. Weights are uniform (each real pitch = one π̂ sample).
+    """
+    from hitter.train import build_inference_features
+    from hitter.compose import COUNTS
+
+    pp = pitcher_pitches.copy()
+    pp["batter"] = int(target_batter_id)              # swap -> target's profile
+    feats = build_inference_features(pp, batter_cache, pitcher_cache)
+    valid = set(COUNTS)
+    by_count = {c: g for c, g in feats.groupby(["balls", "strikes"])
+                if (int(c[0]), int(c[1])) in valid}
+    by_count = {(int(b), int(s)): g for (b, s), g in by_count.items()}
+
+    def provider(count):
+        g = by_count.get(count)
+        if g is None or len(g) == 0:
+            g = feats                                  # fallback: overall mix
+        return g, np.ones(len(g))
+
+    return provider
+
+
+def model_ops_by_batter(panel, pitcher_pitches, hitter_model, xwoba_to_outcome,
+                        batter_cache, pitcher_cache):
+    """Model OPS per panel batter via the cascade + analytic count-tree, against
+    the fixed reference pitcher (so cross-batter spread flows through the cascade).
+    """
+    from hitter.compose import compose_pa
+
+    out: dict[int, dict[str, float]] = {}
+    for batter in panel:
+        provider = build_empirical_pitch_provider(
+            pitcher_pitches, batter, batter_cache, pitcher_cache)
+        out[int(batter)] = compose_pa(hitter_model, provider, xwoba_to_outcome)
+    return out
+
+
+def run_compression_diagnostic(
+    model, xwoba_to_outcome, test_aug: pd.DataFrame,
+    batter_cache, pitcher_cache, *,
+    n_each: int = 6, min_pa: int = 150, n_ref_pitchers: int = 5,
+) -> dict:
+    """THE acceptance gate: real vs cascade-model OPS spread over a batter panel.
+
+    Panel = n_each best + n_each worst by real OPS (>= min_pa). For each of the
+    top ``n_ref_pitchers`` (by pitch count) reference pitchers, compute model OPS
+    per batter (cascade + analytic count-tree) and the spread ratio + Pearson r,
+    then average across reference pitchers (robustness — no single-pitcher fluke).
+
+    Returns the panel, per-(ref) diagnostics, and the averaged spread_ratio / r.
+    Transformer baseline: 6.8x / r=0.66; target ~1x.
+    """
+    real = real_ops_by_batter(test_aug)
+    pa = {b: real[b]["PA"] for b in real}
+    panel = select_batter_panel(real, pa, n_each=n_each, min_pa=min_pa)
+    refs = [int(x) for x in test_aug["pitcher"].value_counts().head(n_ref_pitchers).index]
+
+    per_ref = []
+    model_ops_acc: dict[int, list[float]] = {b: [] for b in panel}
+    for ref in refs:
+        rp = test_aug[test_aug["pitcher"] == ref].copy()
+        mops = model_ops_by_batter(panel, rp, model, xwoba_to_outcome,
+                                   batter_cache, pitcher_cache)
+        d = spread_diagnostic({b: real[b] for b in panel}, mops)
+        per_ref.append({"pitcher": ref, "n_pitches": int(len(rp)), **d})
+        for b in panel:
+            model_ops_acc[b].append(mops[b]["OPS"])
+
+    return {
+        "panel": panel,
+        "real_ops": {b: real[b]["OPS"] for b in panel},
+        "model_ops_mean": {b: float(np.mean(v)) for b, v in model_ops_acc.items()},
+        "per_ref": per_ref,
+        "spread_ratio_mean": float(np.mean([d["spread_ratio"] for d in per_ref])),
+        "pearson_mean": float(np.mean([d["pearson"] for d in per_ref])),
+        "real_std": float(np.std([real[b]["OPS"] for b in panel], ddof=1)),
+    }
+
+
 def spread_diagnostic(
     real_ops: dict[int, dict | float],
     model_ops: dict[int, dict | float],
@@ -150,3 +234,46 @@ def spread_diagnostic(
         "real_mean": float(r.mean()) if len(r) else float("nan"),
         "model_mean": float(m.mean()) if len(m) else float("nan"),
     }
+
+
+def _print_compression_report(result: dict) -> None:
+    print("\nbatter        real_OPS  model_OPS")
+    for b in sorted(result["panel"], key=lambda x: result["real_ops"][x], reverse=True):
+        print(f"  {b:8d}   {result['real_ops'][b]:.3f}    "
+              f"{result['model_ops_mean'][b]:.3f}")
+    print("\n=== COMPRESSION DIAGNOSTIC (avg over "
+          f"{len(result['per_ref'])} reference pitchers) ===")
+    print(f"  real_std        = {result['real_std']:.3f}")
+    print(f"  SPREAD RATIO    = {result['spread_ratio_mean']:.2f}x"
+          "   (transformer 6.8x; target ~1x)")
+    print(f"  Pearson r       = {result['pearson_mean']:.3f}"
+          "   (transformer 0.66)")
+
+
+if __name__ == "__main__":
+    import argparse
+    import json
+
+    from data.profile_cache_loader import ProfileCache
+    from hitter.model import HitterModel
+    from hitter.train import load_pitch_frame
+    from hitter.compose import xwoba_outcome_fn
+
+    ap = argparse.ArgumentParser(description="Hitter compression diagnostic")
+    ap.add_argument("--model-dir", default="checkpoints/hitter")
+    ap.add_argument("--test-start", default="2024-07-16")
+    ap.add_argument("--test-end", default="2024-12-31")
+    ap.add_argument("--n-ref-pitchers", type=int, default=5)
+    ap.add_argument("--fold-id", type=int, default=0)
+    args = ap.parse_args()
+
+    model = HitterModel(args.model_dir)
+    xfn = xwoba_outcome_fn(json.load(
+        open(f"{args.model_dir}/xwoba_outcome_map.json")))
+    bc = ProfileCache(role="batter", fold_id=args.fold_id)
+    pc = ProfileCache(role="pitcher", fold_id=args.fold_id)
+    aug, _ = load_pitch_frame(args.test_start, args.test_end)
+    print(f"test pitches: {len(aug):,}")
+    result = run_compression_diagnostic(
+        model, xfn, aug, bc, pc, n_ref_pitchers=args.n_ref_pitchers)
+    _print_compression_report(result)

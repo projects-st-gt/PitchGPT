@@ -15,6 +15,7 @@ from hitter.compose import (
     COUNTS, TERMINALS, count_index,
     build_transition_matrix, solve_terminal_distribution,
     per_pa_outcome, cascade_transition, compose_pa,
+    build_xwoba_outcome_map, xwoba_outcome_fn,
 )
 
 
@@ -137,6 +138,21 @@ def test_cascade_transition_swing_contact_fair_inplay():
     assert t["1B"] == pytest.approx(0.5)
     # foul at 0-0 (s<2) advances count -> strike
     assert t["strike"] == pytest.approx(0.5)
+
+
+def test_xwoba_outcome_map_low_to_out_high_to_hr():
+    """Empirical map: balls with low xwOBA were outs, high xwOBA were HR."""
+    n = 2000
+    xw = np.linspace(0.0, 2.0, n)
+    events = np.where(xw < 0.5, "field_out", "home_run")
+    m = build_xwoba_outcome_map(xw, events, n_bins=10)
+    fn = xwoba_outcome_fn(m)
+    lo = fn(np.array([0.1]))[0]      # [out,1B,2B,3B,HR]
+    hi = fn(np.array([1.9]))[0]
+    assert lo[0] > 0.9               # mostly out
+    assert hi[4] > 0.9               # mostly HR
+    # every row is a valid distribution
+    assert np.allclose(fn(np.array([0.1, 1.9])).sum(axis=1), 1.0)
 
 
 def test_compose_pa_end_to_end_with_fake_pitch_provider():
