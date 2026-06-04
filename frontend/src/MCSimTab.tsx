@@ -34,10 +34,29 @@ function reachedBase(eventType: string | null): boolean {
   );
 }
 
-function lastName(name: string): string {
-  const parts = name.trim().split(/\s+/);
-  return parts.length > 1 ? parts[parts.length - 1] : name;
+// AVG / OBP / SLG / OPS / BB% / K% derived from the per-PA outcome distribution
+// (the same 7 class probabilities the rollout produces). AB = 1 - P(BB);
+// strikeouts (K) and balls-in-play outs (out) are both at-bats.
+export function deriveStats(d: Record<string, number> | undefined) {
+  const g = (k: string) => (d && d[k] != null ? d[k] : 0);
+  const bb = g("BB");
+  const k = g("K");
+  const hits = g("1B") + g("2B") + g("3B") + g("HR");
+  const ab = 1 - bb;
+  const tb = g("1B") + 2 * g("2B") + 3 * g("3B") + 4 * g("HR");
+  const avg = ab > 0 ? hits / ab : 0;
+  const obp = hits + bb;
+  const slg = ab > 0 ? tb / ab : 0;
+  return { avg, obp, slg, ops: obp + slg, bb, k };
 }
+
+// Baseball convention: drop the leading zero for sub-1.000 rate stats (.275),
+// keep it for OPS that can exceed 1 (1.232).
+function fmt3(x: number): string {
+  const s = x.toFixed(3);
+  return x < 1 ? s.replace(/^0/, "") : s;
+}
+const pct = (x: number) => `${(x * 100).toFixed(0)}%`;
 
 function CellButton({
   cell,
@@ -49,21 +68,24 @@ function CellButton({
   onClick: () => void;
 }) {
   const ops = cell.predicted_ops;
+  const s = deriveStats(cell.predicted_outcome_dist as Record<string, number>);
   const acted = cell.actual && cell.actual.pa_count > 0 ? cell.actual : null;
   return (
     <button
       onClick={onClick}
       style={{ backgroundColor: opsTint(ops) }}
       className={[
-        "relative w-full h-12 px-1 flex flex-col items-center justify-center gap-0.5 border-r border-b border-gray-100 transition-state",
+        "relative w-full h-[68px] px-1.5 py-1 flex flex-col items-center justify-center gap-0.5 border-r border-b border-gray-100 transition-state tabular-nums leading-none",
         selected ? "ring-2 ring-accent ring-inset" : "hover:brightness-95",
       ].join(" ")}
-      title={`${cell.batter_name}: OPS ${ops != null ? ops.toFixed(3) : "n/a"}`}
+      title={`${cell.batter_name}: AVG ${fmt3(s.avg)} OPS ${fmt3(s.ops)} BB ${pct(s.bb)} K ${pct(s.k)}`}
     >
-      <span className="text-small font-medium tabular-nums text-gray-900 leading-none">
-        {ops != null ? ops.toFixed(2) : "—"}
+      <span className="text-small font-medium text-gray-900">{fmt3(s.avg)}</span>
+      <span className="text-[13px] font-semibold text-gray-900">{fmt3(s.ops)}</span>
+      <span className="text-[10px] text-gray-500">
+        BB {pct(s.bb)} · K {pct(s.k)}
       </span>
-      <span className="flex items-center gap-1 leading-none">
+      <span className="flex items-center gap-1">
         <PitchGlyph type={cell.modal_type as PitchType} dim />
         {acted ? (
           <span className="flex gap-0.5">
@@ -109,9 +131,9 @@ function StaffGrid({
               {hitters.map((h, i) => (
                 <th
                   key={i}
-                  className="text-small font-medium text-gray-500 px-1 py-2 border-r border-b border-gray-200 whitespace-nowrap"
+                  className="text-small font-medium text-gray-500 px-2 py-2 border-r border-b border-gray-200 whitespace-nowrap min-w-[88px]"
                 >
-                  {lastName(h)}
+                  {h}
                 </th>
               ))}
             </tr>
@@ -127,7 +149,7 @@ function StaffGrid({
                 {row.cells.map((cell) => {
                   const key = `${row.pitcher_id}:${cell.batter_id}`;
                   return (
-                    <td key={cell.batter_id} className="p-0 w-16">
+                    <td key={cell.batter_id} className="p-0 min-w-[88px]">
                       <CellButton
                         cell={cell}
                         selected={selectedKey === key}
