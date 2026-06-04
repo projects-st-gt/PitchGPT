@@ -56,6 +56,17 @@ improvement. Do not paste accuracy numbers into PRs without it.
    demo cache must come from real Statcast via pybaseball. No synthetic,
    mocked, generated, or interpolated pitches anywhere. The frontend may
    scaffold against a JSON fixture of *real* pitches before the API is up.
+1a. **No placeholder / stub / boilerplate code in production paths.** Every
+   function shipped in a non-test module must be a real, complete
+   implementation — no `pass`/`return None` stubs, no "TODO: implement", no
+   fabricated constants standing in for values that should be computed from
+   data, no hardcoded fallback numbers presented as if real. If a value can be
+   derived from the real data, derive it; if a degenerate-case guard is truly
+   needed, make it raise or use an *explicitly data-derived* fallback (e.g. the
+   empirical mean), never a magic literal. Synthetic data is allowed ONLY in
+   `tests/` as controlled fixtures for unit-testing pure functions — never in
+   training, eval, inference, or demo code. When in doubt, compute it for real
+   or raise; do not paper over a gap.
 2. **Temporal splits.** Train ≤ 2023, val = 2024H1, test = 2024H2 + 2025.
    Never shuffle at-bats across years. Player-profile trailing windows must
    end strictly before the at-bat in question — no within-game leakage either.

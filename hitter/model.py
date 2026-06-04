@@ -17,10 +17,6 @@ import pandas as pd
 
 from hitter.train import ML_NODES, predict_from_artifacts
 
-#: Foul-rate fallback for a count never seen in training (P(foul | contact)).
-#: ~0.35 is a reasonable MLB-wide foul-on-contact rate; only hit for absent counts.
-_DEFAULT_FOUL_RATE = 0.35
-
 
 class HitterModel:
     """Loaded hitter/swing cascade. Vectorized, CPU, stateless after load."""
@@ -47,11 +43,15 @@ class HitterModel:
         for key, rate in self._meta.get("foul_rate_by_count", {}).items():
             b, s = key.split(",")
             self._foul_rates[(int(b), int(s))] = float(rate)
-        # global mean foul rate as the per-model fallback (better than a constant)
-        self._foul_fallback = (
-            float(np.mean(list(self._foul_rates.values())))
-            if self._foul_rates else _DEFAULT_FOUL_RATE
-        )
+        if not self._foul_rates:
+            raise ValueError(
+                f"{self._dir}/meta.json has no foul_rate_by_count; the model is "
+                "incomplete — retrain (no fabricated fallback is used)."
+            )
+        # Fallback for a count absent from training = the empirical MEAN of the
+        # real per-count foul rates (all 12 counts are populated on real data, so
+        # this is a guard, not a fabricated value).
+        self._foul_fallback = float(np.mean(list(self._foul_rates.values())))
 
     @property
     def nodes(self) -> list[str]:
