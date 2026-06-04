@@ -334,10 +334,17 @@ def build_single_ab_batch(
     """
     if n_replicates < 1:
         raise ValueError(f"n_replicates must be ≥ 1; got {n_replicates}")
+    # as_of_fallback=True: this is the inference/rollout path, which includes
+    # synthetic pre-game ABs (MCSim matchup cards) whose game_date can be beyond
+    # the profile-cache horizon. As-of fallback gives each player their latest
+    # known profile instead of a zero vector. For real historical ABs the exact
+    # date is in the cache, so as-of never triggers — behaviour is unchanged.
+    from functools import partial
+
     ds = PitchGPTAtBatDataset(
         pitches=pitches_df,
-        pitcher_profile_lookup=nuisance.pitcher_cache.lookup,
-        batter_profile_lookup=nuisance.batter_cache.lookup,
+        pitcher_profile_lookup=partial(nuisance.pitcher_cache.lookup, as_of_fallback=True),
+        batter_profile_lookup=partial(nuisance.batter_cache.lookup, as_of_fallback=True),
         profile_standardizer=nuisance.standardizer,
     )
     if len(ds) != 1:

@@ -41,6 +41,7 @@ Wiring into ``AtBatDataset`` (the ``ProfileLookup`` contract is just a
 
 from __future__ import annotations
 
+import bisect
 from pathlib import Path
 
 import numpy as np
@@ -83,6 +84,9 @@ class ProfileCache:
 
         self._player_lookup: dict[tuple[int, pd.Timestamp, int], np.ndarray] = {}
         self._league_lookup: dict[tuple[pd.Timestamp, int], np.ndarray] = {}
+        # Lazily-built sorted indices for the as-of fallback (see lookup()).
+        self._player_index: dict[int, tuple[list, list]] | None = None
+        self._league_index: tuple[list, list] | None = None
         self._load_player_cache()
         self._load_league_cache()
 
@@ -144,6 +148,47 @@ class ProfileCache:
                 f"{path} vector length {len(sample)} != expected {self._vector_len}"
             )
 
+    # ---------- as-of index (for pre-game prediction beyond the cache horizon) ----------
+
+    def _ensure_indices(self) -> None:
+        """Build per-player and league sorted-by-(date, game_num) indices once.
+
+        Each index is ``(keys, vectors)`` where ``keys`` is a sorted list of
+        ``(asof_ts, game_num)`` tuples and ``vectors`` the aligned vectors, so
+        an as-of lookup is a binary search.
+        """
+        if self._player_index is not None:
+            return
+        from collections import defaultdict
+
+        pidx: dict[int, list[tuple[tuple[pd.Timestamp, int], np.ndarray]]] = defaultdict(list)
+        for (pid, ts, gn), vec in self._player_lookup.items():
+            pidx[pid].append(((ts, gn), vec))
+        self._player_index = {}
+        for pid, entries in pidx.items():
+            entries.sort(key=lambda e: e[0])
+            self._player_index[pid] = ([e[0] for e in entries], [e[1] for e in entries])
+
+        lentries = sorted(
+            (((ts, gn), vec) for (ts, gn), vec in self._league_lookup.items()),
+            key=lambda e: e[0],
+        )
+        self._league_index = ([e[0] for e in lentries], [e[1] for e in lentries])
+
+    @staticmethod
+    def _latest_before(index, target_key):
+        """Rightmost vector whose (date, game_num) key is STRICTLY < target_key.
+
+        Strictly-less preserves the no-leakage rule: a profile dated before the
+        game's (date, game_num) ordinal had its trailing window end before the
+        game, so it never sees at-or-after content.
+        """
+        if index is None:
+            return None
+        keys, vectors = index
+        i = bisect.bisect_left(keys, target_key)  # first key >= target
+        return vectors[i - 1] if i > 0 else None
+
     # ---------- lookup ----------
 
     def lookup(
@@ -151,25 +196,29 @@ class ProfileCache:
         player_id: int,
         asof_date: pd.Timestamp | str,
         asof_game_num: int,
+        as_of_fallback: bool = False,
     ) -> dict:
         """Return the blended profile vector for this (player, asof) key.
 
-        Three-step fallback chain:
+        Fallback chain:
 
-        1. **Per-player exists.** Blend with league-mean via
+        1. **Per-player exact-date exists.** Blend with league-mean via
            ``blend_with_league_mean``: NaN slots get league-mean values;
            non-NaN slots get confidence-weighted blend.
-        2. **Per-player missing, league exists.** Use the league-mean vector
+        2. **(``as_of_fallback=True`` only) Per-player as-of.** No exact-date
+           entry, but the player has earlier profiles: use their most recent one
+           STRICTLY BEFORE ``asof`` (their latest known form), blended with the
+           latest league-mean before ``asof``. This is what lets a pre-game card
+           for a date beyond the cache horizon distinguish players instead of
+           collapsing everyone to zero. Strictly-before preserves no-leakage.
+           Off by default so training/eval keep exact-date semantics.
+        3. **Per-player missing, league exists.** Use the league-mean vector
            outright (debut player at a known asof).
-        3. **Both missing.** Zero vector. Source flagged so caller can tell.
+        4. **Both missing.** Zero vector. Source flagged so caller can tell.
 
-        After steps 1-2, any remaining NaN in the result (which can happen
-        when *both* the per-player slot and the league-mean slot are NaN —
-        typical for the very first days of the corpus, when no player has
-        a 30-day prior window) is replaced with 0. The model receives
-        purely numeric input; sparse-data slots are still distinguishable
-        from real zeros via paired count features (``n_pitches``,
-        ``n_pas``, ``profile_confidence``, etc.).
+        Any remaining NaN in the result is replaced with 0; sparse-data slots
+        stay distinguishable from real zeros via the paired count features
+        (``n_pitches``, ``n_pas``, ``profile_confidence``, etc.).
         """
         asof_ts = pd.Timestamp(asof_date)
         league_key = (asof_ts, int(asof_game_num))
@@ -189,6 +238,22 @@ class ProfileCache:
                 vec = blend_with_league_mean(player_vec, league_vec, confidence)
             vec = np.nan_to_num(vec, nan=0.0).astype(np.float32)
             return {"vector": vec, "source": "per_player_blended"}
+
+        if as_of_fallback:
+            self._ensure_indices()
+            target = (asof_ts, int(asof_game_num))
+            prior = self._latest_before(self._player_index.get(int(player_id)), target)
+            if prior is not None:
+                confidence = float(prior[self._confidence_idx])
+                lvec = league_vec if league_vec is not None else self._latest_before(
+                    self._league_index, target
+                )
+                if lvec is None:
+                    vec = np.where(np.isnan(prior), 0.0, prior).astype(np.float32)
+                else:
+                    vec = blend_with_league_mean(prior, lvec, confidence)
+                vec = np.nan_to_num(vec, nan=0.0).astype(np.float32)
+                return {"vector": vec, "source": "per_player_asof"}
 
         if league_vec is not None:
             vec = np.nan_to_num(league_vec.copy(), nan=0.0).astype(np.float32)

@@ -266,3 +266,62 @@ def test_lookup_league_only_path_also_nan_free(tmp_path):
     out = pc.lookup(999, "2017-04-02", 1)  # unknown player
     assert out["source"] == "league_only"
     assert not np.any(np.isnan(out["vector"]))
+
+
+# ============================================================
+# As-of fallback (pre-game prediction beyond the cache horizon)
+# ============================================================
+
+def _asof_cache(tmp_path):
+    """Player 1 has profiles at three dates; league skipped so the as-of path
+    returns the selected player vector verbatim (clean equality checks)."""
+    _write_cache(
+        tmp_path, "pitcher", 0,
+        player_rows=[
+            (1, "2024-05-01", 1, _vec(1.0)),
+            (1, "2024-06-01", 1, _vec(2.0)),
+            (1, "2024-07-01", 1, _vec(3.0)),
+        ],
+        league_rows=[],
+        skip_league=True,
+    )
+    return ProfileCache(role="pitcher", fold_id=0, profiles_dir=tmp_path)
+
+
+def test_asof_exact_date_still_wins(tmp_path):
+    pc = _asof_cache(tmp_path)
+    out = pc.lookup(1, "2024-06-01", 1, as_of_fallback=True)
+    assert out["source"] == "per_player_blended"
+    np.testing.assert_allclose(out["vector"], _vec(2.0))
+
+
+def test_asof_returns_latest_prior_when_exact_missing(tmp_path):
+    pc = _asof_cache(tmp_path)
+    out = pc.lookup(1, "2024-08-01", 1, as_of_fallback=True)  # beyond all profiles
+    assert out["source"] == "per_player_asof"
+    np.testing.assert_allclose(out["vector"], _vec(3.0))  # latest (2024-07-01)
+
+
+def test_asof_is_strictly_before_no_leakage(tmp_path):
+    pc = _asof_cache(tmp_path)
+    # mid-range date: must pick 2024-06-01 (strictly before), NOT 2024-07-01
+    out = pc.lookup(1, "2024-06-15", 1, as_of_fallback=True)
+    assert out["source"] == "per_player_asof"
+    np.testing.assert_allclose(out["vector"], _vec(2.0))
+    # same date but EARLIER game_num than the stored (07-01, 1): must not grab
+    # the 07-01 profile (not strictly before) -> falls back to 06-01
+    out2 = pc.lookup(1, "2024-07-01", 0, as_of_fallback=True)
+    assert out2["source"] == "per_player_asof"
+    np.testing.assert_allclose(out2["vector"], _vec(2.0))
+
+
+def test_asof_off_by_default(tmp_path):
+    pc = _asof_cache(tmp_path)
+    out = pc.lookup(1, "2024-08-01", 1)  # default: no as-of
+    assert out["source"] == "zero_fallback"  # league skipped -> zero
+
+
+def test_asof_no_fabrication_for_player_without_history(tmp_path):
+    pc = _asof_cache(tmp_path)
+    out = pc.lookup(999, "2024-08-01", 1, as_of_fallback=True)  # unknown player
+    assert out["source"] == "zero_fallback"  # as-of never invents a profile
