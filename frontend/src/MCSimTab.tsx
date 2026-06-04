@@ -131,7 +131,7 @@ function StaffGrid({
               {hitters.map((h, i) => (
                 <th
                   key={i}
-                  className="text-small font-medium text-gray-500 px-2 py-2 border-r border-b border-gray-200 whitespace-nowrap min-w-[88px]"
+                  className="text-small font-medium text-gray-500 px-2 py-2 border-r border-b border-gray-200 whitespace-nowrap min-w-[112px]"
                 >
                   {h}
                 </th>
@@ -149,7 +149,7 @@ function StaffGrid({
                 {row.cells.map((cell) => {
                   const key = `${row.pitcher_id}:${cell.batter_id}`;
                   return (
-                    <td key={cell.batter_id} className="p-0 min-w-[88px]">
+                    <td key={cell.batter_id} className="p-0 min-w-[112px]">
                       <CellButton
                         cell={cell}
                         selected={selectedKey === key}
@@ -289,7 +289,7 @@ export default function MCSimTab() {
   const selectedKey = sel ? `${sel.row.pitcher_id}:${sel.cell.batter_id}` : null;
 
   return (
-    <div className="max-w-6xl mx-auto px-6 py-8">
+    <div className="max-w-[1600px] mx-auto px-6 py-8">
       <div className="text-section mb-1">Matchup cards</div>
       <p className="text-body text-gray-500 mb-6">
         Pre-game scouting grid — every rostered pitcher against every opposing hitter, in a
