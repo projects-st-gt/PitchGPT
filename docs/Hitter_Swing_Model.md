@@ -118,6 +118,29 @@ not a Transformer.** Reserve attention for the pitch sequence where it earns its
 keep. Only escalate the hitter model to a small sequence model (C) if a measured
 "in-AB adjustment" gap justifies it.
 
+### 4a. Sequencing IS real — capture it with recent-pitch features, not attention
+
+Hitters *are* affected by the previous pitch(es) — sequencing/tunneling is a
+genuine effect (two fastballs → hitter times the heater → a slider plays better;
+high FB then low CU; sitting on a pitch just seen). So the hitter model must NOT
+be memoryless. **But that memory is short-range and low-order** — a PA is only
+~3–5 pitches, and the relevant context is essentially *the last pitch or two +
+the count + the pitch-mix seen so far this AB*. So make these **first-class input
+features** to the tabular model:
+
+- previous pitch type / zone / velo / result (lag-1, optionally lag-2),
+- count (balls–strikes) and pitch number within the AB,
+- running counts of each pitch type seen this AB (cumulative mix),
+- (optional) "same type as last pitch?" and "eye-level change" flags.
+
+This captures the sequencing a Transformer would learn, but handed *directly* —
+there's no long-range structure to discover over ~4 pitches that lag-features
+miss. **Attention earns its keep when context is long and the model must learn
+*which* positions matter; here it's the last pitch, which we just feed in.**
+Empirical guard: build with lag-features first; only if a held-out gap shows
+residual multi-pitch (tunneling-sequence) signal does a small sequence model (C)
+become justified. Earn the attention; don't assume it.
+
 ---
 
 ## 5. How it composes with the pitch sequence model
