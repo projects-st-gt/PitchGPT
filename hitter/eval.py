@@ -151,9 +151,10 @@ def build_empirical_pitch_provider(pitcher_pitches, target_batter_id,
 
 
 def model_ops_by_batter(panel, pitcher_pitches, hitter_model, xwoba_to_outcome,
-                        batter_cache, pitcher_cache):
+                        batter_cache, pitcher_cache, *, outcome_mode="xwoba"):
     """Model OPS per panel batter via the cascade + analytic count-tree, against
     the fixed reference pitcher (so cross-batter spread flows through the cascade).
+    ``outcome_mode`` selects the in-play model (multiclass head | xwoba map | auto).
     """
     from hitter.compose import compose_pa
 
@@ -161,7 +162,8 @@ def model_ops_by_batter(panel, pitcher_pitches, hitter_model, xwoba_to_outcome,
     for batter in panel:
         provider = build_empirical_pitch_provider(
             pitcher_pitches, batter, batter_cache, pitcher_cache)
-        out[int(batter)] = compose_pa(hitter_model, provider, xwoba_to_outcome)
+        out[int(batter)] = compose_pa(hitter_model, provider, xwoba_to_outcome,
+                                      outcome_mode=outcome_mode)
     return out
 
 

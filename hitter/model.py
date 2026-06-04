@@ -15,7 +15,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from hitter.train import ML_NODES, predict_from_artifacts
+from hitter.train import NODE_OBJECTIVE, predict_from_artifacts
+
+#: All node names that may have a saved artifact (ML_NODES + the optional
+#: contact_outcome multiclass head).
+_LOADABLE_NODES = tuple(NODE_OBJECTIVE)
 
 
 class HitterModel:
@@ -30,7 +34,7 @@ class HitterModel:
         import joblib
 
         self._artifacts: dict[str, dict] = {}
-        for node in ML_NODES:
+        for node in _LOADABLE_NODES:
             path = self._dir / f"{node}.joblib"
             if path.exists():
                 self._artifacts[node] = joblib.load(path)

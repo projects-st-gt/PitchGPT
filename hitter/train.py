@@ -135,6 +135,13 @@ def add_cascade_labels(df: pd.DataFrame) -> pd.DataFrame:
     # called_strike: defined on takes only
     called = (out["description"] == "called_strike").astype("float32")
     out["called_strike"] = np.where(~is_swing, called, np.nan).astype("float32")
+
+    # contact_code: in-play outcome class on FAIR balls only, encoded to match
+    # compose's [out,1B,2B,3B,HR] order (out=0..HR=4). NaN off-contact.
+    if "events" in out.columns:
+        code_map = {"in_play_out": 0, "1B": 1, "2B": 2, "3B": 3, "HR": 4}
+        codes = L.contact_outcome(out["events"]).map(code_map).astype("float32")
+        out["contact_code"] = np.where(out["fair"] == 1, codes, np.nan).astype("float32")
     return out
 
 
@@ -158,6 +165,9 @@ def node_population(df: pd.DataFrame, node: str) -> tuple[pd.DataFrame, pd.Serie
     if node == "contact_quality":
         mask = (df["fair"] == 1) & df["estimated_woba_using_speedangle"].notna()
         return df[mask], df.loc[mask, "estimated_woba_using_speedangle"]
+    if node == "contact_outcome":
+        mask = (df["fair"] == 1) & df["contact_code"].notna()
+        return df[mask], df.loc[mask, "contact_code"].astype(int)
     raise ValueError(f"unknown node {node!r}")
 
 
@@ -187,13 +197,14 @@ _COMMON_FEATURES = BASE_FEATURE_COLS + _MOVEMENT_COLS + ["outs_when_up"] \
 
 #: Per-node feature list. S1b (called_strike) is mostly location/umpire/framing —
 #: minimal batter signal; S3 (contact_quality) adds park/roof/temp (Coors carry).
+_S3_FEATURES = _COMMON_FEATURES + ["ballpark_id", "roof_state", "temp_bucket"]
 NODE_FEATURES: dict[str, list[str]] = {
     "swing": _COMMON_FEATURES,
     "whiff": _COMMON_FEATURES,
     "called_strike": (BASE_FEATURE_COLS + ["umpire_id", "catcher_id"]
                       + _BATTER_COLS),
-    "contact_quality": (_COMMON_FEATURES
-                        + ["ballpark_id", "roof_state", "temp_bucket"]),
+    "contact_quality": _S3_FEATURES,
+    "contact_outcome": _S3_FEATURES,          # multiclass {out,1B,2B,3B,HR}
 }
 #: High-cardinality id columns handled via XGBoost native categorical support.
 NODE_CATEGORICAL: dict[str, list[str]] = {
@@ -201,6 +212,7 @@ NODE_CATEGORICAL: dict[str, list[str]] = {
     "whiff": [],
     "called_strike": ["umpire_id", "catcher_id"],
     "contact_quality": ["ballpark_id", "roof_state", "temp_bucket"],
+    "contact_outcome": ["ballpark_id", "roof_state", "temp_bucket"],
 }
 #: Monotone priors kept minimal + clean (forcing wrong ones hurts calibration).
 #: whiff never decreases with velo (chase-and-miss) — the one unambiguous prior.
@@ -209,10 +221,11 @@ NODE_MONOTONE: dict[str, dict[str, int]] = {
     "whiff": {"release_speed": 1},
     "called_strike": {},
     "contact_quality": {},
+    "contact_outcome": {},
 }
 NODE_OBJECTIVE = {
     "swing": "binary", "whiff": "binary", "called_strike": "binary",
-    "contact_quality": "regression",
+    "contact_quality": "regression", "contact_outcome": "multiclass",
 }
 
 
@@ -325,6 +338,8 @@ def predict_from_artifacts(artifacts: dict, X: pd.DataFrame) -> np.ndarray:
     if artifacts["objective"] == "binary":
         raw = booster.predict_proba(M)[:, 1]
         return artifacts["calibrator"].transform(raw)
+    if artifacts["objective"] == "multiclass":
+        return booster.predict_proba(M)        # (n, n_classes)
     return booster.predict(M)
 
 
@@ -367,6 +382,7 @@ def train_node(
     learning_rate: float = 0.05,
     seed: int = 0,
     n_jobs: int | None = None,
+    n_classes: int = 0,
 ) -> dict:
     """Fit one cascade node (XGBoost) + per-node isotonic calibration.
 
@@ -463,7 +479,28 @@ def train_node(
                 "categorical": categorical, "cat_dtypes": cat_dtypes,
                 "objective": objective}
 
-    raise ValueError(f"objective must be 'binary' or 'regression', got {objective!r}")
+    if objective == "multiclass":
+        from sklearn.metrics import accuracy_score, log_loss as _ll
+
+        model = xgb.XGBClassifier(objective="multi:softprob", num_class=n_classes,
+                                  eval_metric="mlogloss", **common)
+        model.fit(Xtr, y_train, eval_set=[(Xva, y_val)], verbose=False)
+        proba_va = model.predict_proba(Xva)
+        metrics["accuracy"] = float(accuracy_score(y_val, proba_va.argmax(1)))
+        metrics["logloss"] = float(_ll(y_val, proba_va, labels=list(range(n_classes))))
+        metrics["n_train"] = int(len(y_train))
+        metrics["n_classes"] = int(n_classes)
+
+        def predict(X: pd.DataFrame) -> np.ndarray:
+            return model.predict_proba(_mat(X))
+
+        return {"booster": model, "calibrator": None, "predict": predict,
+                "metrics": metrics, "feature_names": feature_names,
+                "categorical": categorical, "cat_dtypes": cat_dtypes,
+                "objective": objective, "n_classes": int(n_classes)}
+
+    raise ValueError(
+        f"objective must be 'binary'|'regression'|'multiclass', got {objective!r}")
 
 
 def attach_xwoba_target(df: pd.DataFrame, raw: pd.DataFrame) -> pd.DataFrame:

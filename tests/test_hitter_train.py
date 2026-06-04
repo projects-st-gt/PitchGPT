@@ -167,6 +167,25 @@ def test_train_node_binary_learns_and_calibrates():
           f"logloss={res['metrics']['logloss']:.3f} ECE={res['metrics']['ece']:.3f}")
 
 
+def test_train_node_multiclass_learns_and_returns_distribution():
+    """Multiclass node (contact outcome) returns per-row (n, n_classes) probs."""
+    rng = np.random.default_rng(0)
+    n = 5000
+    x1 = rng.normal(size=n)
+    # 5 classes whose likelihood shifts with x1 (ordinal-ish: low x1 -> class 0)
+    y = np.clip(((x1 + 3) / 1.2).astype(int), 0, 4)
+    X = pd.DataFrame({"x1": x1, "x2": rng.normal(size=n)})
+    res = train_node(X.iloc[:4000], pd.Series(y[:4000]),
+                     X.iloc[4000:], pd.Series(y[4000:]),
+                     objective="multiclass", feature_names=["x1", "x2"],
+                     n_classes=5)
+    P = res["predict"](X.iloc[4000:])
+    assert P.shape == (1000, 5)
+    assert np.allclose(P.sum(axis=1), 1.0, atol=1e-5)
+    assert res["metrics"]["accuracy"] > 0.5
+    print(f"\n[multiclass] acc={res['metrics']['accuracy']:.3f}")
+
+
 def test_train_node_regression_learns():
     rng = np.random.default_rng(0)
     n = 4000

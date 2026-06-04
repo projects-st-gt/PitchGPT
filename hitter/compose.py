@@ -155,23 +155,38 @@ def cascade_transition(
     pitch_features: pd.DataFrame,
     pitch_weights: np.ndarray,
     hitter,
-    xwoba_to_outcome,
+    xwoba_to_outcome=None,
+    *,
+    outcome_mode: str = "xwoba",
 ) -> dict[str, float]:
     """Marginal per-pitch transition distribution for ``count``.
 
     Runs the hitter cascade on the candidate pitches, forms each pitch's event
     distribution {ball, strike, stay, out..HR}, then averages over pitches by
-    ``pitch_weights`` (π̂(pitch | count)). ``xwoba_to_outcome(xwoba)`` maps the
-    contact-quality regression output to a (n, 5) distribution over
-    [out, 1B, 2B, 3B, HR].
+    ``pitch_weights`` (π̂(pitch | count)).
+
+    The in-play split over [out,1B,2B,3B,HR] comes from one of two outcome models
+    (``outcome_mode``):
+    - ``"multiclass"`` — the ``contact_outcome`` head's per-pitch (n,5) directly.
+    - ``"xwoba"``      — ``xwoba_to_outcome(contact_quality)`` (scalar xwOBA + the
+                         global empirical map).
+    - ``"auto"``       — multiclass if the model has it, else xwoba.
     """
     b, s = count
     casc = hitter.predict_cascade(pitch_features)
     p_swing = np.clip(casc["swing"], 0, 1)
     p_whiff = np.clip(casc["whiff"], 0, 1)
     p_called = np.clip(casc["called_strike"], 0, 1)
-    xwoba = casc["contact_quality"]
     fr = float(hitter.foul_rate(b, s))
+
+    use_mc = outcome_mode == "multiclass" or (
+        outcome_mode == "auto" and "contact_outcome" in casc)
+    if use_mc:
+        oc = np.asarray(casc["contact_outcome"], dtype=float)   # (n, 5)
+    else:
+        if xwoba_to_outcome is None:
+            raise ValueError("outcome_mode='xwoba' needs xwoba_to_outcome")
+        oc = xwoba_to_outcome(casc["contact_quality"])          # (n, 5)
 
     p_take = 1.0 - p_swing
     p_ball = p_take * (1.0 - p_called)
@@ -185,7 +200,6 @@ def cascade_transition(
     stay_mass = p_foul if s == 2 else np.zeros_like(p_foul)
     ball_mass = p_ball
 
-    oc = xwoba_to_outcome(xwoba)                      # (n, 5)
     inplay_split = p_fair[:, None] * oc               # (n, 5)
 
     w = np.asarray(pitch_weights, dtype=float)
@@ -202,21 +216,28 @@ def cascade_transition(
 def compose_pa(
     hitter,
     pitch_provider,
-    xwoba_to_outcome,
+    xwoba_to_outcome=None,
     *,
     start: tuple[int, int] = (0, 0),
+    outcome_mode: str = "xwoba",
 ) -> dict[str, float]:
     """Full analytic per-PA outcome for one matchup.
 
+    ``outcome_mode`` defaults to ``"xwoba"`` — the scalar xwOBA-on-contact head +
+    empirical map, which beat the multiclass ``contact_outcome`` head on the
+    compression gate (2.62× vs 2.81×); multiclass remains available as an option.
+
     ``pitch_provider(count) -> (pitch_features_df, weights)`` supplies π̂'s pitch
-    distribution per count (the PitchGPT seam). Returns the per-PA metric bundle
-    plus the raw terminal distribution under key ``"terminal"``.
+    distribution per count (the PitchGPT seam). ``outcome_mode`` selects the
+    in-play outcome model ("multiclass" head | "xwoba" map | "auto"). Returns the
+    per-PA metric bundle plus the raw terminal distribution under key ``"terminal"``.
     """
     transitions = {}
     for count in COUNTS:
         feats, weights = pitch_provider(count)
         transitions[count] = cascade_transition(
-            count, feats, weights, hitter, xwoba_to_outcome)
+            count, feats, weights, hitter, xwoba_to_outcome,
+            outcome_mode=outcome_mode)
     Q, R = build_transition_matrix(transitions)
     terminal = solve_terminal_distribution(Q, R, start=start)
     metrics = per_pa_outcome(terminal)
