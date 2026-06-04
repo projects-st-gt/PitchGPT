@@ -135,3 +135,40 @@ def build_step_features(
     for i in range(len(pvec)):
         df[f"p{i}"] = pvec[i]
     return df
+
+
+def make_hitter_step_fn(hitter_model, xwoba_to_outcome, *, batter_vec,
+                        pitcher_stuff_vec, velo_by_type, spin_by_type,
+                        same_hand, centroids, ctx_cat, foul_rate_fn):
+    """Per-cell closure: maps a rollout step's sampled pitches -> (result_probs,
+    outcome5). Composes build_step_features -> cascade.predict_cascade ->
+    cascade_to_result_probs. ``foul_rate_fn(b, s)`` gives P(foul|contact).
+
+    Returns ``step(type_ids, zone_ids, balls, strikes, prev_type_ids,
+    prev_zone_ids, n_prev) -> (result_probs (N,7), outcome5 (N,5))``.
+    """
+    def step(type_ids, zone_ids, balls, strikes, prev_type_ids, prev_zone_ids, n_prev):
+        X = build_step_features(
+            type_ids=type_ids, zone_ids=zone_ids, balls=balls, strikes=strikes,
+            prev_type_ids=prev_type_ids, prev_zone_ids=prev_zone_ids, n_prev=n_prev,
+            batter_vec=batter_vec, pitcher_stuff_vec=pitcher_stuff_vec,
+            velo_by_type=velo_by_type, spin_by_type=spin_by_type,
+            same_hand=same_hand, centroids=centroids, ctx_cat=ctx_cat)
+        casc = hitter_model.predict_cascade(X)
+        outcome5 = xwoba_to_outcome(casc["contact_quality"])      # (N,5)
+        # foul rate is count-constant; rows in this step share (balls,strikes)?
+        # not necessarily — apply per-row.
+        fr = np.array([foul_rate_fn(int(b), int(s)) for b, s in zip(balls, strikes)])
+        # cascade_to_result_probs takes a scalar foul_rate; fold per-row by looping
+        # the unique rates is overkill — apply elementwise via the decomposition.
+        rp = cascade_to_result_probs(casc["swing"], casc["called_strike"],
+                                     casc["whiff"], 0.0, outcome5)  # foul=0 placeholder
+        # re-apply per-row foul split: move contact*fr from in_play into foul
+        s = np.clip(casc["swing"], 0, 1); w = np.clip(casc["whiff"], 0, 1)
+        contact = s * (1 - w)
+        in_play_total = rp[:, 4] + rp[:, 5] + rp[:, 6]            # currently all contact mass (foul=0)
+        keep = 1.0 - fr                                           # fraction staying in play
+        rp[:, 3] = contact * fr                                   # foul
+        rp[:, 4] *= keep; rp[:, 5] *= keep; rp[:, 6] *= keep      # scale in-play down
+        return rp, outcome5
+    return step
