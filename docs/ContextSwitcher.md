@@ -2,6 +2,50 @@
 
 **Last updated**: 2026-06-03 (late) — hitter-model build handed off.
 
+## ⭐⭐ HITTER MODEL — STEPS 1-4 DONE, PASSES THE GATE (2026-06-03 late)
+
+**The dedicated hitter cascade works.** Compression diagnostic on held-out 2024H2
+(12-batter panel, avg over 5 reference pitchers):
+- **spread ratio 2.58×** (was **6.8×** for the transformer; target ~1×)
+- **Pearson r 0.90** (was 0.66) — near-perfect hitter ordering
+- **model_mean 0.76 == real_mean 0.76** (transformer regressed everyone to ~.70)
+- robust across ref pitchers (2.44–2.78×, r 0.875–0.925)
+
+**Built + tested (42 hitter tests green), all on real Statcast, no placeholders:**
+- `hitter/train.py` — 4 XGBoost nodes trained on FULL 4.74M pitches →
+  `checkpoints/hitter/`. Full-data AUC: swing 0.869, called_strike 0.985,
+  whiff 0.787; contact_quality (xwOBA reg) RMSE 0.369 / r 0.216. **Honest
+  held-out ECE** (not the in-sample ~0): swing 0.009, called_strike 0.004,
+  whiff 0.007 — all well-calibrated. **macOS XGBoost segfault root-caused**:
+  feed numpy not pandas (columnar adapter crash) + `n_jobs=1`/`OMP_NUM_THREADS=1`
+  (libomp race). cat cols via int codes + `feature_types`.
+- `hitter/model.py` — `HitterModel.predict_cascade` (round-trip tested).
+- `hitter/compose.py` — analytic count-tree solve (absorbing Markov, closed form)
+  + real `xwoba_outcome_map` (275K in-play balls) at `checkpoints/hitter/`.
+- `hitter/eval.py` — `run_compression_diagnostic` + CLI (`python -m hitter.eval`).
+- New CLAUDE.md hard rule **1a**: no placeholder/stub/boilerplate/fabricated
+  constants in production paths; synthetic data only in tests/.
+
+**Remaining gap is at the LOW end** (weak hitters .40–.51 real → .61–.70 model,
+under-punished). The lever to push 2.58× → ~1× is **contact_quality** (monotonic
+xwOBA↑middle constraint, or the {1B/2B/3B/HR/out} multiclass head).
+
+**NEXT (handoff steps 5-6):**
+5. Wire into `causal/g_computation.py` behind `outcome_model="head"|"hitter"`
+   (cascade = μ̂; keep π̂ from PitchGPT). Re-check AIPW≈g-comp + negative
+   control≈0 before using causal language on its outputs.
+6. `mcsim/matchup_card.py` `compose="analytic"` option → re-run
+   `run_matchup_cards.py` for an in-range date (≤2026-05-08).
+
+**small-v7:** original ephemeral run was CANCELLED at epoch 1/3 (session ended).
+RELAUNCHED detached as app **`ap-9gGQmUoG4mbk4DzXcdSWuf`** (full 3 epochs). Pull
+when done: `modal volume get pitchgpt-data checkpoints/small-fold0-v7
+./checkpoints_modal/` → calibrate → re-run compression diagnostic on it (capacity
+test). NOTE: the hitter model already recovers most of the spread, so small-v7 is
+now a comparison point, not the fix.
+
+---
+
 ## ⭐ START HERE (current state — supersedes older sections below)
 
 - **Active branch: `hitter-swing-model`** (17 ahead of `main`). SUPERSET of
