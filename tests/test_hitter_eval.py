@@ -12,9 +12,15 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from pathlib import Path
+
 from hitter.eval import (
     real_ops_by_batter, spread_diagnostic, select_batter_panel,
+    held_out_node_metrics,
 )
+
+_HAVE_MODEL = Path("checkpoints/hitter/meta.json").exists()
+_HAVE_TEST = bool(sorted(Path("data/augmented/2024").glob("2024-07-2*.parquet")))
 
 
 def _pa_rows(batter, events):
@@ -77,3 +83,23 @@ def test_select_batter_panel_respects_min_pa():
     pa = {1: 200, 2: 100, 3: 200, 4: 100}     # 2 and 4 below min
     panel = select_batter_panel(real, pa, n_each=1, min_pa=150)
     assert set(panel) == {1, 3}
+
+
+@pytest.mark.skipif(not (_HAVE_MODEL and _HAVE_TEST),
+                    reason="needs trained checkpoints/hitter + 2024H2 test data")
+def test_held_out_calibration_is_honest_and_good():
+    """ECE in meta.json is ~0 (in-sample isotonic artifact); the honest held-out
+    ECE must be a real, small number — not 0, and well-calibrated (<0.05)."""
+    from data.profile_cache_loader import ProfileCache
+    from hitter.model import HitterModel
+    from hitter.train import build_training_frame, load_pitch_frame
+    hm = HitterModel("checkpoints/hitter")
+    b = ProfileCache(role="batter", fold_id=0)
+    p = ProfileCache(role="pitcher", fold_id=0)
+    test_df = build_training_frame(*load_pitch_frame("2024-07-19", "2024-07-22"), b, p)
+    m = held_out_node_metrics(hm, test_df)
+    assert "swing" in m and "auc" in m["swing"]
+    for node in ("swing", "called_strike", "whiff"):
+        assert 0.0 < m[node]["ece"] < 0.05, f"{node} ECE not honest/good: {m[node]['ece']}"
+    print("\nhonest held-out ECE:",
+          {k: round(v["ece"], 4) for k, v in m.items() if "ece" in v})

@@ -20,6 +20,10 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from hitter.train import (
+    NODE_OBJECTIVE, binary_ece, node_population,
+)
+
 # Event -> per-PA accounting. Each terminal `events` value contributes to the
 # AVG/OBP/SLG ledger. Unknown/None events are treated as in-play outs (PA+AB,
 # no hit) only if the row is a terminal (events not null).
@@ -58,6 +62,43 @@ def real_ops_by_batter(pitches: pd.DataFrame) -> dict[int, dict[str, float]]:
         slg = float(tb / ab) if ab > 0 else 0.0
         out[int(batter)] = {"AVG": avg, "OBP": obp, "SLG": slg,
                             "OPS": obp + slg, "PA": int(pa)}
+    return out
+
+
+def held_out_node_metrics(
+    model, test_df: pd.DataFrame,
+) -> dict[str, dict[str, float]]:
+    """Per-node AUC / **ECE on HELD-OUT test data** (+ regression RMSE/r).
+
+    This is the HONEST calibration number: the isotonic calibrator was fit on the
+    val set, so train-time ECE (reported in meta.json) is ~0 by construction. Here
+    we predict on the test population (2024H2+2025) the calibrator never saw, so
+    the ECE actually measures generalization (calibration is a project primary
+    metric — eval-protocol).
+    """
+    from sklearn.metrics import roc_auc_score, mean_squared_error
+
+    out: dict[str, dict[str, float]] = {}
+    for node in model.nodes:
+        X, y = node_population(test_df, node)
+        if len(y) == 0:
+            continue
+        pred = model.predict_node(node, X)
+        yv = y.to_numpy()
+        if NODE_OBJECTIVE[node] == "binary":
+            out[node] = {
+                "n": int(len(yv)),
+                "auc": float(roc_auc_score(yv, pred)),
+                "ece": binary_ece(pred, yv),
+                "base_rate": float(yv.mean()),
+            }
+        else:
+            out[node] = {
+                "n": int(len(yv)),
+                "rmse": float(np.sqrt(mean_squared_error(yv, pred))),
+                "pearson": float(np.corrcoef(pred, yv)[0, 1]),
+                "mean_target": float(yv.mean()),
+            }
     return out
 
 
