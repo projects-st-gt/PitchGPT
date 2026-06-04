@@ -2,6 +2,37 @@
 
 **Last updated**: 2026-06-03 (late) — hitter-model build handed off.
 
+## ⭐⭐⭐⭐ pitchGPT + CASCADE SIMULATOR WORKS (2026-06-04)
+
+**`g_compute(outcome_model="hitter", hitter_step_fn=...)` is built + working.**
+pitchGPT (small-v7) samples each pitch sequentially (full context + sequence
+preserved); the CASCADE decides the batter response (not the transformer's weak
+outcome head). Default `"head"` mode byte-unchanged (8 natural-mode tests pass).
+E2E: elite hitter vs RHP, 300 sims → OPS 1.24 / K% 25.8% / HR 11.4%.
+
+The pieces (`hitter/rollout.py`, all tested):
+- `cascade_to_result_probs` — translator: cascade outputs → 7-class result vocab.
+- `build_step_features` — sampled pitch → cascade features (zone→centroid via
+  `checkpoints/hitter/zone_centroids.json`, velo/spin from pitcher per-type means,
+  prev pitch as the lag → SEQUENCE preserved inside the rollout).
+- `make_hitter_step_fn` — per-cell closure bundling cascade + translator.
+
+**NEXT (the actual experiment the user wants):**
+1. **Backtest pitchGPT+cascade vs lookup+cascade vs baseline** on real PAs (does
+   pitchGPT's batter-aware, sequence-aware pitch selection beat the count-only
+   lookup? lookup already = 1.405 < 1.452 baseline). The MC rollout is slow, so
+   sample. NOTE: the pitchGPT-path OPS looked hot (1.24) — its in-play mix differs
+   from the lookup, so it likely needs its own outcome-map calibration check
+   (rebuild the map on predicted-xwoba over PITCHGPT-sampled pitches, or confirm
+   the existing map holds). Don't trust the level until calibrated + backtested.
+2. **matchup cards**: `mcsim/matchup_card.py` → call g_compute hitter mode; run
+   June 4; publish to demo (:8000/:5173 running). Switch DEFAULT_CKPT → small-v7.
+3. **App A**: chain hitter-mode PAs through a base-out-inning game state machine.
+4. (Future) retrain a PITCH-ONLY transformer (drop outcome heads → free capacity
+   for π̂) — test pitch top-1/calibration; only after pitchGPT beats the lookup.
+
+---
+
 ## ⭐⭐⭐ HITTER MODEL — CALIBRATED + BEATS BASELINE (2026-06-04)
 
 **Per-PA backtest (the real "does it work" measure) now PASSES.** Cascade +
