@@ -1,6 +1,48 @@
 # ContextSwitcher — Pick up where this session left off
 
-**Last updated**: 2026-06-05 — pitchGPT+cascade per-PA backtest DONE (it LOST).
+**Last updated**: 2026-06-05 — backtest LOSS root-caused → zone-CENTROID glue bug → small-v8 brainstorm next.
+
+## 🟢 ROOT CAUSE FOUND: the zone-CENTROID location glue (2026-06-05)
+
+**Why pitchGPT+cascade lost the backtest (under-reported walks): the simulator
+feeds the batter cascade each pitch's location as its ZONE CENTROID, not a real
+spot.** Decisive isolation (`scripts/hitter/diagnose_glue_isolation.py`, cascade
+on real held-out pitches, swap one glue factor at a time):
+
+| variant (cascade on real pitches) | ball | swing |
+|---|---|---|
+| ALL REAL features | 0.354 | 0.485 |
+| **loc = zone centroid** | **0.303** | **0.537** |
+| velo = type-mean | 0.353 | 0.485 |
+| spin = blank | 0.350 | 0.490 |
+
+Location-centroid ALONE reproduces the rollout's ball deficit (0.30 vs real 0.35)
+and swing excess; velo/spin do nothing. Mechanism: the 4 out-of-zone zones are
+COARSE (real |plate_x| spreads 0.83→4 ft, std 0.55; 37% are >1.1 ft out), but the
+centroid collapses each to ONE borderline point (~0.9 ft, just off the corner).
+So every out-of-zone pitch looks borderline → batter chases → too few takes → too
+few balls. A small per-pitch ball deficit COMPOUNDS (walk needs 4 balls):
+(0.303/0.354)^4 ≈ 0.54 → 9.3% real walks × 0.54 ≈ 5.0% ≈ the observed 5.2%.
+
+**RULED OUT (each tested):** in-zone over-prediction (~0.48 ≈ real once active-
+masked — the "80% in-zone" was a measurement artifact from counting dead at-bats),
+drift/self-feedback, spin placeholder, velo means, count-blindness, truncation
+(0.04%), ballpark/catcher/umpire context, the type-conditioned zone step. The
+pitchGPT zone HEAD is well-calibrated on real data (teacher-forced 49% ≈ real;
+zone top-1 25% so no leakage). **The model is fine; the simulator GLUE was wrong.**
+
+**Two measurement bugs I hit (don't repeat):** (1) capturing per-pitch stats over
+ALL rollout paths incl. terminated ones inflates rates — mask to ACTIVE; (2)
+reading propensity at NCTX vs NC-1 is off-by-one (NC-1 predicts the FIRST pitch).
+
+**FIX (decided): retrain pitchGPT → small-v8 with a CONTINUOUS location head** (so
+it generates a real (x,z) the cascade eats directly — no centroid). Also: use the
+model's native velo/spin, decide what to do with the now-unused outcome/result
+heads, + other improvements. → brainstorm next (see below / new spec).
+NOTE a cheap interim hybrid (sample a real within-zone location by zone×type) was
+discussed but user chose the principled retrain.
+
+---
 
 ## 🔴🔴🔴 pitchGPT+cascade BACKTEST — IT LOSES TO LOOKUP *AND* BASELINE (2026-06-05)
 
