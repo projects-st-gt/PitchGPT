@@ -2,6 +2,68 @@
 
 **Last updated**: 2026-06-03 (late) — hitter-model build handed off.
 
+## ⭐⭐⭐⭐⭐ APP A — FULL-GAME SIM ENGINE (brainstorm, 2026-06-05) — NEXT BIG BUILD
+
+**Goal:** simulate a whole game from 0-0 top-1st ~10K times → **projected score +
+win probability**, pre-game, backtested against real finals. Drives a daily
+prediction site. (NOT live in-game.)
+
+**THE THREE LAYERS (this resolves the recurring "which model does what" confusion):**
+- **Per-pitch** (pitchGPT π̂ + hitter cascade μ̂): what pitch, what the batter does to it. ✅ BUILT.
+- **Per-AT-BAT** (compose / g_compute hitter mode): chain pitches → the PA *result*
+  (K/BB/1B/2B/3B/HR/out). ✅ BUILT — this IS a matchup-card cell's outcome_dist.
+- **Per-GAME** (App A): chain PAs → **runs → score**. ⬅️ THE NEW LAYER. Needs a
+  base-running model — the pitch/hitter models say "single", they say NOTHING about
+  whether the runner on 2nd scores. Converting PA-results → runs is separate.
+
+**KEY FEASIBILITY INSIGHT (why 10K full-game sims are tractable):** do NOT re-run
+the ~32s/PA rollout inside the game loop. **PRECOMPUTE** the per-(pitcher,batter)
+outcome distribution ONCE (= exactly what a matchup-card cell already holds), then
+the 10K game sims just SAMPLE from those precomputed dists through a fast pure-Python
+state machine. The matchup cards ARE App A's fuel.
+
+**BASE-RUNNING MODEL — DECIDED (pressure-tested 2026-06-05): empirical base-out
+transition matrix.** For each (base_state[8], outs[3], PA_outcome[7]) → real
+distribution over (next base_state, runs_scored), computed from Statcast play-by-play
+(on_1b/2b/3b + runner movement in data/raw/). Data-grounded, what real sim engines use,
+backtestable. Deterministic (single=+1 base) = too crude (under-counts runs); full
+event detail (SB/CS/GIDP/errors/first-to-third) = overkill/overfit for v0.
+- KNOWN v0 limitations (flag, enrich in v2): league-AVERAGE base-running (no player
+  sprint-speed — it's in Statcast for v2); per-PA dist is NEUTRAL-context (no
+  pitch-around / 3rd-time-through fade — partly handled by pitching-change logic);
+  no individual SB/error events.
+
+**GAME STATE MACHINE — components to build:**
+- State: inning, top/bot, outs, base_state (runners 1/2/3), score, per-team lineup
+  pointer (1-9, cycles), current pitcher (starter → bullpen).
+- Per PA: look up (cur_pitcher, cur_batter) precomputed outcome dist → sample outcome
+  → apply base-out transition matrix → advance bases + add runs → next batter.
+- Pitching changes (v0 rule-based): starter ~6IP / ~100 pitches → bullpen by
+  leverage/role. (Improve later.)
+- Loop 9 innings (+extras if tied) → final score. Monte Carlo 10K → score
+  distribution → win prob + projected score + run-total.
+
+**VALIDATION (this is how we KNOW it's good — backtest vs real finals):**
+- We have actuals via `scripts/mcsim/fetch_actuals.py` (June 4 already overlaid).
+- Metrics: (1) win-prob calibration (when we say 60%, does A win ~60%?), (2)
+  projected-score / run-total accuracy vs actual, (3) score-distribution calibration.
+- Backtest on a set of past completed games BEFORE predicting future ones (D8 discipline).
+
+**REUSES (don't rebuild):** g_compute hitter mode / matchup_card cells (per-PA fuel),
+`data/run_value/` (base-out + RE24 tables — start here for the transition matrix),
+`mcsim/storage.py` (a new app="game_sim"), `fetch_actuals` (validation), the demo
+(a new App-A tab later). Modal: cap is **10 containers** (user's plan) — size runs as
+~rows/10 × per-unit time.
+
+**BUILD ORDER (suggested):** (1) build + unit-test the base-out transition matrix from
+real play-by-play; (2) pure-Python GameState + step(PA_outcome) → bases/runs (TDD,
+hand-checkable cases like "single w/ runner on 2nd"); (3) game Monte Carlo wrapping the
+precomputed per-PA dists + pitching changes; (4) backtest harness vs actuals; (5) only
+then a daily-prediction path + UI. Follow brainstorming→writing-plans: this section is
+the brainstorm; next session should formalize the spec + plan first.
+
+---
+
 ## ⭐⭐⭐⭐ pitchGPT + CASCADE SIMULATOR WORKS (2026-06-04)
 
 **`g_compute(outcome_model="hitter", hitter_step_fn=...)` is built + working.**
