@@ -187,3 +187,55 @@ def main(
     print("\nRemote training complete:")
     import json
     print(json.dumps(summary, indent=2))
+
+
+# ---- Matchup-card inference (pitchGPT + hitter cascade) on GPU --------------
+# A separate image: cards need xgboost (cascade) + requests (MLB API) + the
+# hitter/mcsim/causal packages. No augmented data needed — only model + profiles
+# + cascade artifacts live on the volume.
+card_image = (
+    modal.Image.debian_slim(python_version="3.11")
+    .pip_install("torch>=2.4", "pandas>=2.2", "pyarrow>=15", "numpy>=1.26,<2.1",
+                 "scikit-learn>=1.3", "xgboost>=2.0", "joblib", "requests>=2.31",
+                 "tqdm>=4.66")
+    .add_local_python_source("model", "data", "scripts", "hitter", "mcsim", "causal")
+)
+
+
+@app.function(image=card_image, gpu="L4", volumes={"/data": volume},
+              timeout=60 * 60 * 2)
+def card_remote(task: dict) -> dict:
+    """Compute one game's pitchGPT+cascade matchup card on a GPU. ``task`` carries
+    the game fields + date + n_paths + rng_seed. Returns the card payload dict."""
+    import os
+    from pathlib import Path
+    import torch
+    from causal.nuisance import NuisanceModels
+    from mcsim.matchup_card import compute_matchup_card
+    from mcsim.mlb_api import get_active_roster
+    from hitter.rollout import load_hitter_ctx
+
+    # The volume mounts at /data, so the code's relative "data/profiles" (used by
+    # NuisanceModels' own ProfileCache) resolves to /data/profiles when cwd="/".
+    os.chdir("/")
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    nz = NuisanceModels(
+        Path("/data/checkpoints/small-fold0-v7/checkpoint_calibrated.pt"), device=dev)
+    ctx = load_hitter_ctx("/data/checkpoints/hitter", profiles_dir="/data/profiles")
+
+    date = task["date"]
+    home_p, home_h = get_active_roster(
+        task["home_team_id"], date, probable_pitcher_id=task.get("home_probable_pitcher_id"))
+    away_p, away_h = get_active_roster(
+        task["away_team_id"], date, probable_pitcher_id=task.get("away_probable_pitcher_id"))
+    card = compute_matchup_card(
+        nz, game_pk=task["game_pk"], game_date=date,
+        home_team=task["home_team"], away_team=task["away_team"],
+        home_pitchers=home_p, away_pitchers=away_p,
+        home_lineup=home_h, away_lineup=away_h,
+        n_paths=task.get("n_paths", 300), rng_seed=task.get("rng_seed", 1),
+        outcome_model="hitter", hitter_ctx=ctx)
+    card["_game_pk"] = task["game_pk"]
+    card["_away"] = task["away_team"]
+    card["_home"] = task["home_team"]
+    return card

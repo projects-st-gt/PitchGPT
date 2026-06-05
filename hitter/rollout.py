@@ -180,22 +180,26 @@ def make_hitter_step_fn(hitter_model, xwoba_to_outcome, *, batter_vec,
 # Matchup-card integration: load the cascade context once, build per-cell step fns
 # ---------------------------------------------------------------------------
 
-def load_hitter_ctx(model_dir: str = "checkpoints/hitter", fold_id: int = 0) -> dict:
+def load_hitter_ctx(model_dir: str = "checkpoints/hitter", fold_id: int = 0,
+                    profiles_dir=None) -> dict:
     """Load everything a worker needs to build per-cell cascade step fns once:
     the HitterModel, the xwOBA→outcome map, zone centroids, and profile caches.
+    ``profiles_dir`` overrides the ProfileCache location (e.g. on a Modal volume).
     """
     import json
+    from pathlib import Path
     from data.profile_cache_loader import ProfileCache
     from hitter.model import HitterModel
     from hitter.compose import xwoba_outcome_fn
+    pdir = Path(profiles_dir) if profiles_dir else None
     hm = HitterModel(model_dir)
     xfn = xwoba_outcome_fn(json.load(open(f"{model_dir}/xwoba_outcome_map.json")))
     cent = {int(k): v for k, v in
             json.load(open(f"{model_dir}/zone_centroids.json")).items()}
     return {
         "hm": hm, "xfn": xfn, "cent": cent,
-        "bc": ProfileCache(role="batter", fold_id=fold_id),
-        "pc": ProfileCache(role="pitcher", fold_id=fold_id),
+        "bc": ProfileCache(role="batter", fold_id=fold_id, profiles_dir=pdir),
+        "pc": ProfileCache(role="pitcher", fold_id=fold_id, profiles_dir=pdir),
     }
 
 
