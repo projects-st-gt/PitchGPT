@@ -86,24 +86,37 @@ def build_step_features(
     same_hand: int,
     centroids: dict,
     ctx_cat: dict,
+    plate_x: np.ndarray | None = None,
+    plate_z: np.ndarray | None = None,
+    velo_native: np.ndarray | None = None,
+    spin_native: np.ndarray | None = None,
+    spin_axis_sin: np.ndarray | None = None,
+    spin_axis_cos: np.ndarray | None = None,
 ) -> pd.DataFrame:
     """Build the cascade's per-pitch feature frame for one rollout step (N paths).
 
-    Pitch identity (type, zone) comes from what pitchGPT just sampled; location is
-    the zone centroid, velo/spin the pitcher's per-type means (the sampled
-    velo-bin is a deviation decile ≈ the type mean, so we use the mean and skip
-    the bin→mph inversion). ``prev_type_ids`` carries the SEQUENCE (the pitch
-    before), so the cascade's lag features are real inside the rollout. Context
-    columns (outs, spin_axis) use neutral values — secondary to type/location/
-    count/profiles. Batter & pitcher profile vectors broadcast across rows.
+    When ``plate_x``/``plate_z`` are provided (v8 MDN), uses real sampled
+    coordinates instead of zone centroids.  When ``velo_native``/``spin_native``
+    are provided, uses the model's native sampled values instead of per-type
+    means.  Falls back to centroids/means when None (v7 compat).
     """
     n = len(type_ids)
     tid = np.asarray(type_ids, int)
     zid = np.asarray(zone_ids, int)
-    cx = np.array([centroids.get(int(z), [0.0, 2.5])[0] for z in zid], float)
-    cz = np.array([centroids.get(int(z), [0.0, 2.5])[1] for z in zid], float)
-    velo = np.array([velo_by_type.get(int(t), _LEAGUE_VELO) for t in tid], float)
-    spin = np.array([spin_by_type.get(int(t), _LEAGUE_SPIN) for t in tid], float)
+    if plate_x is not None and plate_z is not None:
+        cx = np.asarray(plate_x, float)
+        cz = np.asarray(plate_z, float)
+    else:
+        cx = np.array([centroids.get(int(z), [0.0, 2.5])[0] for z in zid], float)
+        cz = np.array([centroids.get(int(z), [0.0, 2.5])[1] for z in zid], float)
+    if velo_native is not None:
+        velo = np.asarray(velo_native, float)
+    else:
+        velo = np.array([velo_by_type.get(int(t), _LEAGUE_VELO) for t in tid], float)
+    if spin_native is not None:
+        spin = np.asarray(spin_native, float)
+    else:
+        spin = np.array([spin_by_type.get(int(t), _LEAGUE_SPIN) for t in tid], float)
     in_zone = np.isin(zid, list(_IN_ZONE_IDS)).astype("int8")
     prev_in_zone = np.where(
         prev_zone_ids < 0, -1,
@@ -115,8 +128,10 @@ def build_step_features(
         "plate_x": cx.astype("float32"), "plate_z": cz.astype("float32"),
         "release_speed": velo.astype("float32"),
         "release_spin_rate": spin.astype("float32"),
-        "spin_axis_sin": np.zeros(n, "float32"),
-        "spin_axis_cos": np.zeros(n, "float32"),
+        "spin_axis_sin": (np.asarray(spin_axis_sin, "float32") if spin_axis_sin is not None
+                          else np.zeros(n, "float32")),
+        "spin_axis_cos": (np.asarray(spin_axis_cos, "float32") if spin_axis_cos is not None
+                          else np.zeros(n, "float32")),
         "balls": np.asarray(balls, "int16"), "strikes": np.asarray(strikes, "int16"),
         "pitch_number": (np.asarray(n_prev, int) + 1).astype("int16"),
         "in_zone": in_zone,
@@ -147,15 +162,21 @@ def make_hitter_step_fn(hitter_model, xwoba_to_outcome, *, batter_vec,
     cascade_to_result_probs. ``foul_rate_fn(b, s)`` gives P(foul|contact).
 
     Returns ``step(type_ids, zone_ids, balls, strikes, prev_type_ids,
-    prev_zone_ids, n_prev) -> (result_probs (N,7), outcome5 (N,5))``.
+    prev_zone_ids, n_prev, **kwargs) -> (result_probs (N,7), outcome5 (N,5))``.
+
+    Optional kwargs (v8 MDN path): ``plate_x``, ``plate_z``, ``velo_native``,
+    ``spin_native``, ``spin_axis_sin``, ``spin_axis_cos``. When provided, these
+    override zone centroids / per-type means / zero spin axis respectively.
     """
-    def step(type_ids, zone_ids, balls, strikes, prev_type_ids, prev_zone_ids, n_prev):
+    def step(type_ids, zone_ids, balls, strikes, prev_type_ids, prev_zone_ids,
+             n_prev, **kwargs):
         X = build_step_features(
             type_ids=type_ids, zone_ids=zone_ids, balls=balls, strikes=strikes,
             prev_type_ids=prev_type_ids, prev_zone_ids=prev_zone_ids, n_prev=n_prev,
             batter_vec=batter_vec, pitcher_stuff_vec=pitcher_stuff_vec,
             velo_by_type=velo_by_type, spin_by_type=spin_by_type,
-            same_hand=same_hand, centroids=centroids, ctx_cat=ctx_cat)
+            same_hand=same_hand, centroids=centroids, ctx_cat=ctx_cat,
+            **kwargs)
         casc = hitter_model.predict_cascade(X)
         outcome5 = xwoba_to_outcome(casc["contact_quality"])      # (N,5)
         # foul rate is count-constant; rows in this step share (balls,strikes)?

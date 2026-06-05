@@ -63,8 +63,9 @@ class ForwardOut:
     marginal_propensity_probs: dict[str, torch.Tensor]
     result_logits: torch.Tensor
     result_probs: torch.Tensor
-    ab_outcome_logits: torch.Tensor
-    ab_outcome_probs: torch.Tensor
+    ab_outcome_logits: Optional[torch.Tensor]
+    ab_outcome_probs: Optional[torch.Tensor]
+    pitch_hidden: Optional[torch.Tensor] = None
 
     @property
     def n_context_tokens(self) -> int:
@@ -185,6 +186,7 @@ class NuisanceModels:
         post-temperature softmax probabilities for every head, on CPU.
         """
         bd = self._to_device(batch)
+        need_hidden = getattr(self.model.config, "location_mdn", False)
         out = self.model(
             pitcher_profile=bd["pitcher_profile"],
             batter_profile=bd["batter_profile"],
@@ -193,6 +195,7 @@ class NuisanceModels:
             intended_actions=bd["intended_actions"],
             padding_mask=bd["padding_mask"],
             arsenal=bd.get("arsenal"),
+            return_hidden=need_hidden,
         )
 
         prop_logits: dict[str, torch.Tensor] = {}
@@ -207,9 +210,17 @@ class NuisanceModels:
         result_scaled = self._apply_temp(result_raw, "result")
         result_probs = F.softmax(result_scaled, dim=-1)
 
-        ab_raw = out["ab_outcome_per_pos"].detach().to("cpu").float()
-        ab_scaled = self._apply_temp(ab_raw, "ab_outcome")
-        ab_probs = F.softmax(ab_scaled, dim=-1)
+        if "ab_outcome_per_pos" in out:
+            ab_raw = out["ab_outcome_per_pos"].detach().to("cpu").float()
+            ab_scaled = self._apply_temp(ab_raw, "ab_outcome")
+            ab_probs = F.softmax(ab_scaled, dim=-1)
+        else:
+            ab_raw = None
+            ab_probs = None
+
+        pitch_hidden = None
+        if need_hidden and "hidden" in out:
+            pitch_hidden = out["hidden"].detach().to("cpu").float()
 
         # Type-marginal execution distributions (ADR-013). For a checkpoint
         # WITHOUT type_conditioned_heads this is identical to prop_probs (the
@@ -247,6 +258,7 @@ class NuisanceModels:
             result_probs=result_probs,
             ab_outcome_logits=ab_raw,
             ab_outcome_probs=ab_probs,
+            pitch_hidden=pitch_hidden,
         )
 
     # ---------- per-position accessors ----------

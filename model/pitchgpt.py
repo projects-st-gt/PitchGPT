@@ -230,6 +230,7 @@ class PitchGPT(nn.Module):
         padding_mask: torch.Tensor | None = None,  # (B, T) True=real, False=pad
         arsenal: torch.Tensor | None = None,  # (B, n_arsenal_dims) — required if config.arsenal_per_pitch
         return_intermediates: bool = False,
+        return_hidden: bool = False,
     ) -> dict[str, torch.Tensor]:
         """Forward pass. Returns logits for all heads.
 
@@ -530,9 +531,62 @@ class PitchGPT(nn.Module):
         if location_mdn_out is not None:
             out["location_mdn"] = location_mdn_out  # {log_w (B,T,K), mu (B,T,K,2), log_std (B,T,K,2)}
 
+        if return_hidden:
+            out["hidden"] = x  # (B, T_total, d_model) — post-ln_final trunk hidden
         if return_intermediates:
             out["intermediates"] = intermediates
         return out
+
+    @torch.no_grad()
+    def sample_location_mdn_for_rollout(
+        self,
+        hidden_at_pos: torch.Tensor,
+        type_ids: torch.Tensor,
+        zone_ids: torch.Tensor,
+        velo_ids: torch.Tensor,
+        spin_axis: torch.Tensor,
+        generator: torch.Generator | None = None,
+    ) -> torch.Tensor:
+        """Run the AR fusion chain + MDN on a single set of sampled factors.
+
+        At rollout time, the trunk hidden comes from the forward pass (captured
+        externally), and the factor ids have just been sampled. This runs only
+        the small fusion MLPs — no transformer re-forward.
+
+        Args:
+            hidden_at_pos: (N, d_model) post-ln_final trunk hidden at the
+                prediction position.
+            type_ids: (N,) sampled type ids (with TYPE_ID_OFFSET, 1..7).
+            zone_ids, velo_ids: (N,) sampled factor ids.
+            spin_axis: (N, 2) sin/cos spin axis.
+            generator: torch RNG for reproducible sampling.
+
+        Returns:
+            (N, 2) sampled (plate_x, plate_z).
+        """
+        if not self.config.location_mdn:
+            raise RuntimeError("sample_location_mdn_for_rollout requires location_mdn")
+        te = self.embed.type_emb(type_ids)
+        if self.config.type_conditioned_heads:
+            h = self.type_fusion(torch.cat([hidden_at_pos, te], -1))
+        else:
+            h = hidden_at_pos
+
+        if self.config.autoregressive_exec_heads:
+            ze = self.embed.zone_emb(zone_ids)
+            velo_cond = torch.relu(self.zone_fusion(torch.cat([h, ze], -1)))
+            ve = self.embed.velo_emb(velo_ids)
+            spin_cond = torch.relu(self.velo_fusion(torch.cat([velo_cond, ve], -1)))
+            sae = (self.embed.spin_axis_proj(spin_axis)
+                   if self.config.spin_axis_circular
+                   else self.embed.spin_axis_emb(spin_axis))
+            loc_cond = torch.relu(self.spin_fusion(torch.cat([spin_cond, sae], -1)))
+        else:
+            loc_cond = h
+
+        log_w, mu, log_std = self.location_mdn(loc_cond.unsqueeze(1))
+        sampled = self.location_mdn.sample(log_w, mu, log_std, generator=generator)
+        return sampled.squeeze(1)
 
     @torch.no_grad()
     def execution_logits_for_type(

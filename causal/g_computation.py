@@ -598,6 +598,26 @@ def g_compute(
         # spin_axis: use the placeholder; intended spin_axis matches.
         intended["spin_axis"][:, step, :] = full["spin_axis"][:, step, :]
 
+        # --- Sample location from MDN (v8) if available -------------------------
+        step_kwargs = {}  # extra kwargs for hitter_step_fn (plate_x, plate_z, etc.)
+        if outcome_model == "hitter" and getattr(nuisance.model.config, "location_mdn", False):
+            device = nuisance._device
+            h_full = out.pitch_hidden  # (N, T_total, d) — post-ln_final, on CPU
+            h_at_pred = h_full[:, seq_idx_for_predicting_step, :].to(device)
+            type_t = full["type"][:, step].to(device)
+            zone_t = torch.from_numpy(sampled_zone.astype(np.int64)).to(device)
+            velo_t = torch.from_numpy(sampled_velo.astype(np.int64)).to(device)
+            sa_t = full["spin_axis"][:, step, :].to(device)
+            with torch.no_grad():
+                loc = nuisance.model.sample_location_mdn_for_rollout(
+                    h_at_pred, type_t, zone_t, velo_t, sa_t,
+                )  # (N, 2)
+            loc_np = loc.cpu().numpy()
+            step_kwargs["plate_x"] = np.clip(loc_np[:, 0], -2.5, 2.5)
+            step_kwargs["plate_z"] = np.clip(loc_np[:, 1], 0.0, 5.0)
+            step_kwargs["spin_axis_sin"] = full["spin_axis"][:, step, 0].numpy()
+            step_kwargs["spin_axis_cos"] = full["spin_axis"][:, step, 1].numpy()
+
         # --- Determine the pitch's result --------------------------------------
         if outcome_model == "hitter":
             # pitchGPT already picked the pitch (type/zone/velo above); the
@@ -612,7 +632,8 @@ def g_compute(
             pzids = (full["zone"][:, step - 1].cpu().numpy() if step > 0
                      else np.full(N, -1, dtype=np.int64))
             nprev = np.full(N, step, dtype=np.int64)
-            rp_np, oc5 = hitter_step_fn(tids, zids, balls, strikes, ptids, pzids, nprev)
+            rp_np, oc5 = hitter_step_fn(tids, zids, balls, strikes, ptids, pzids,
+                                         nprev, **step_kwargs)
             result_probs_step = torch.from_numpy(rp_np.astype(np.float32))
             sampled_result = _sample_from_probs(result_probs_step, rng, active)
             # record the detailed in-play outcome ([out,1B,2B,3B,HR]) for paths
