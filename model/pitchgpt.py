@@ -127,6 +127,31 @@ class PitchGPT(nn.Module):
                     nn.init.normal_(m.weight, mean=0.0, std=config.init_std)
                     nn.init.zeros_(m.bias)
 
+        # Full autoregressive execution-head conditioning (ADR-014 Decision 2).
+        # Completes ADR-013's type→{zone,velo,spin}-in-parallel into the chain
+        #   type → zone|type → velo|type,zone → spin|type,zone,velo → loc|all
+        # via small fusion MLPs that mix in each factor's teacher-forced (or, at
+        # rollout, sampled) embedding — NOT by re-running the transformer. Each
+        # fusion is Linear(d + d → d): [prior-conditioning vector, next factor's
+        # d-dim embedding] → next-stage conditioning vector. The zone head itself
+        # is left to the ADR-013 type-conditioned path (zone|type), so the AR
+        # chain starts at velo.
+        if config.autoregressive_exec_heads:
+            d = config.d_model
+            self.zone_fusion = nn.Linear(d + d, d)   # [hidden_exec(type), zone_emb] -> velo cond
+            self.velo_fusion = nn.Linear(d + d, d)   # [velo cond, velo_emb]         -> spin cond
+            self.spin_fusion = nn.Linear(d + d, d)   # [spin cond, spin_axis_emb]    -> loc cond
+            for lin in (self.zone_fusion, self.velo_fusion, self.spin_fusion):
+                nn.init.normal_(lin.weight, mean=0.0, std=config.init_std)
+                nn.init.zeros_(lin.bias)
+
+        # Continuous-location MDN head (ADR-014 Decision 1): a mixture of K 2D
+        # Gaussians over (plate_x, plate_z), conditioned on the final link of the
+        # AR chain. Default OFF so pre-v8 checkpoints reload unchanged.
+        if config.location_mdn:
+            from model.heads import LocationMDN
+            self.location_mdn = LocationMDN(config, d_in=config.d_model)
+
         # ADR 012 ("fix #2"): FiLM-condition the trunk on the player profile —
         # an MLP maps (pitcher ++ batter) profile → per-layer (gamma, beta),
         # and each transformer block's input is modulated `gamma_l * x + beta_l`,
@@ -167,7 +192,10 @@ class PitchGPT(nn.Module):
             spin_axis_proj=self.embed.spin_axis_proj if config.spin_axis_circular else None,
             spin_axis_emb=None if config.spin_axis_circular else self.embed.spin_axis_emb,
         )
-        self.ab_outcome = ABOutcomeHead(config)
+        # AB-outcome head (ADR-014 Decision 4): redundant with the cascade +
+        # RE24 in v8, so it's gated off there. Default ON for v7 back-compat.
+        if config.ab_outcome_head:
+            self.ab_outcome = ABOutcomeHead(config)
 
         # GPT-2-style residual init scaling (helps deeper networks)
         self._scale_residual_init()
@@ -363,6 +391,99 @@ class PitchGPT(nn.Module):
             propensity_logits_full["type"] = type_full
             propensity_logits = propensity_logits_full
 
+        # 6c. Full autoregressive execution-head conditioning + location MDN
+        #     (ADR-014 Decision 2). Completes the ADR-013 chain:
+        #       type → zone|type → velo|type,zone → spin|type,zone,velo
+        #              → location-MDN|type,zone,velo,spin.
+        #     The zone head stays as the ADR-013 type-conditioned output (zone|
+        #     type); this block recomputes velo/spin (and the MDN) so each
+        #     conditions on the prior factors of the SAME predicted pitch.
+        #
+        #     Convention: the propensity heads predict pitch t+1 (targets are the
+        #     left-shift of the input factors; see model/pitchgpt_dataset.py and
+        #     scripts/train_pitchgpt.compute_losses). So the conditioning factor
+        #     embeddings are the LEFT-SHIFT of pitch_factors — zone[t+1] etc., the
+        #     other factors of the pitch being predicted — exactly as the ADR-013
+        #     path conditions on next_type = shift_left(type). At rollout the
+        #     caller writes the sampled/intervened factors into pitch_factors, so
+        #     the same path serves do(.). Last position's shifted factor is PAD/0
+        #     (loss-ignored).
+        #
+        #     Precedence: when autoregressive_exec_heads is ON, the AR path takes
+        #     precedence over the ADR-013-only velo/spin (it consumes the ADR-013
+        #     type-conditioned hidden as its base, then conditions further). When
+        #     it is OFF, the ADR-013-only path above is left untouched. If AR is
+        #     on but type_conditioned_heads is off, hidden_exec_full does not
+        #     exist; we fall back to the plain pitch-position hidden so the chain
+        #     still starts from a valid (un-type-conditioned) base.
+        spin_cond = None
+        if self.config.autoregressive_exec_heads or self.config.location_mdn:
+            NC = self.N_CONTEXT_TOKENS
+
+            def _shift_left(v: torch.Tensor) -> torch.Tensor:
+                # position t ← value at t+1; last position ← 0 (loss-ignored)
+                return torch.cat([v[:, 1:], torch.zeros_like(v[:, :1])], dim=1)
+
+            # Base for the chain: the ADR-013 type-conditioned full hidden if it
+            # was built, else the plain pitch-position hidden (same selection the
+            # ADR-013 path uses for hidden_for_heads).
+            if self.config.type_conditioned_heads:
+                ar_base_full = hidden_exec_full  # (B, T_total, d) — type-conditioned
+            else:
+                uses_xprop = (
+                    self.config.propensity_situational
+                    or self.config.inject_profiles_to_head
+                )
+                ar_base_full = x_for_prop if uses_xprop else x
+            ar_base_pitch = ar_base_full[:, NC:, :]  # (B, T, d)
+
+        if self.config.autoregressive_exec_heads:
+            # velo | type, zone : fuse the (type-conditioned) base with zone[t+1].
+            ze = self.embed.zone_emb(_shift_left(pitch_factors["zone"]))  # (B, T, d)
+            velo_cond = torch.relu(
+                self.zone_fusion(torch.cat([ar_base_pitch, ze], dim=-1))
+            )  # (B, T, d)
+            # spin | type, zone, velo : fuse velo_cond with velo[t+1].
+            ve = self.embed.velo_emb(_shift_left(pitch_factors["velo"]))  # (B, T, d)
+            spin_cond = torch.relu(
+                self.velo_fusion(torch.cat([velo_cond, ve], dim=-1))
+            )  # (B, T, d)
+            # Overwrite the velo/spin logits at pitch positions; context-token
+            # positions are loss-ignored, so we only need pitch positions valid.
+            velo_full = propensity_logits["velo"].clone()
+            spin_rate_full = propensity_logits["spin_rate"].clone()
+            spin_axis_full = propensity_logits["spin_axis"].clone()
+            velo_full[:, NC:, :] = self.propensity.velo_proj(velo_cond)
+            spin_rate_full[:, NC:, :] = self.propensity.spin_rate_proj(spin_cond)
+            spin_axis_full[:, NC:, :] = self.propensity.spin_axis_proj(spin_cond)
+            propensity_logits = dict(propensity_logits)
+            propensity_logits["velo"] = velo_full
+            propensity_logits["spin_rate"] = spin_rate_full
+            propensity_logits["spin_axis"] = spin_axis_full
+
+        if self.config.location_mdn:
+            # location | type, zone, velo, spin : fuse the spin-conditioning
+            # vector (or the base hidden if AR is off) with spin_axis[t+1].
+            sa = _shift_left(pitch_factors["spin_axis"])
+            sae = (
+                self.embed.spin_axis_proj(sa)        # (B, T, d) — Linear(2 -> d)
+                if self.config.spin_axis_circular
+                else self.embed.spin_axis_emb(sa)    # (B, T, d)
+            )
+            base = spin_cond if spin_cond is not None else ar_base_pitch
+            if hasattr(self, "spin_fusion"):
+                loc_cond = torch.relu(
+                    self.spin_fusion(torch.cat([base, sae], dim=-1))
+                )  # (B, T, d)
+            else:
+                # AR off but MDN on: no spin_fusion layer; condition the MDN on
+                # the base hidden directly (spin_axis embedding unused here).
+                loc_cond = base
+            log_w, mu, log_std = self.location_mdn(loc_cond)  # pitch positions only
+            location_mdn_out = {"log_w": log_w, "mu": mu, "log_std": log_std}
+        else:
+            location_mdn_out = None
+
         # 7. Result head — shifted-hidden + intended action (per ADR 007 Amendment).
         #
         # The trunk's hidden state at pitch position ``t`` is computed from a
@@ -391,17 +512,24 @@ class PitchGPT(nn.Module):
             intended_actions["spin_axis"],
         )
 
-        # 8. AB-outcome head: applied to terminal-pitch hidden. The caller
-        #    knows which position is terminal (depends on padding); we
-        #    return logits at every pitch position, and the caller selects.
-        ab_outcome_logits_per_pos = self.ab_outcome(pitch_hidden)
-        # Shape (B, T, n_ab_outcome_classes)
-
         out = {
             "propensity": propensity_logits,    # dict of (B, 3+T, ...) — but only pitch positions are valid
             "result": result_logits,            # (B, T, n_result_logits) — pitch positions only
-            "ab_outcome_per_pos": ab_outcome_logits_per_pos,  # (B, T, 7) — caller picks terminal
         }
+
+        # 8. AB-outcome head: applied to terminal-pitch hidden. The caller knows
+        #    which position is terminal (depends on padding); we return logits at
+        #    every pitch position, and the caller selects. Optional (ADR-014
+        #    Decision 4): dropped in v8 via config.ab_outcome_head=False, in which
+        #    case the key is absent from the output.
+        if self.config.ab_outcome_head:
+            out["ab_outcome_per_pos"] = self.ab_outcome(pitch_hidden)  # (B, T, n_ab_outcome_classes)
+
+        # 9. Location MDN params at pitch positions (ADR-014 Decision 1). Present
+        #    only when config.location_mdn is on; the loss/rollout consume these.
+        if location_mdn_out is not None:
+            out["location_mdn"] = location_mdn_out  # {log_w (B,T,K), mu (B,T,K,2), log_std (B,T,K,2)}
+
         if return_intermediates:
             out["intermediates"] = intermediates
         return out
