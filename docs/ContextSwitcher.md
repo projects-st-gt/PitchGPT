@@ -1,6 +1,6 @@
 # ContextSwitcher — Pick up where this session left off
 
-**Last updated**: 2026-06-05 — small-v8 EXECUTION underway: Tasks 1–3 done; resume at Task 4.
+**Last updated**: 2026-06-05 — small-v8 EXECUTION underway: Tasks 1–9 done; T7 (training) running on Modal; resume at T8 (calibrate) after checkpoint lands.
 
 ## 🧵 THE THREAD — why we're building small-v8 (read this first)
 
@@ -49,20 +49,24 @@ TDD, ends at the backtest GATE). **Spec:** `docs/superpowers/specs/2026-06-05-sm
 **ADR:** `docs/decisions/014-...md`. Branch `hitter-swing-model` (NOT main; no worktree).
 
 **DONE (committed):**
-- T1 ADR-014 (`5612066`). T2 config flags (`6e1e80c`): `location_mdn`, `mdn_components=5`,
-  `mdn_logstd_floor=-2.5`, `autoregressive_exec_heads`, `ab_outcome_head` (all default
-  to v7 behavior so v7 ckpts still load). T3 `LocationMDN` head + 3 tests (`4cd0b56`),
-  device-safe nll fix (`ef1455e`). `tests/test_location_mdn.py` green.
+- T1 ADR-014 (`5612066`). T2 config flags (`6e1e80c`). T3 LocationMDN head +
+  tests (`4cd0b56`), device-safe nll fix (`ef1455e`).
+- T4 forward wiring (`e0b3c2c`): AR exec-head conditioning + LocationMDN in forward +
+  AB head optional. v7 back-compat verified (all flags default off).
+- T5 dataset (`039aa26`): `targets["location"]` = left-shifted (plate_x,plate_z) with NaN pad.
+  Named: `location target[0] = (0.083, 3.823)`.
+- T6 training loss (`aaddd91`): MDN NLL + AB loss gated + result weight 0.3 + v8 CLI flags.
+  Named: `loc=5.124` at step 0, `ab_outcome=0.0` (disabled). 50-step smoke passed.
+- T7 modal_app (`45f6c88`): v8 flags forwarded in train_remote + main entrypoint.
+  **TRAINING RUNNING** on Modal (`ap-whcJtDg2dd15EqCyUjxjx4`), L4 GPU, ~1.1 steps/s.
+  At step 600: type=0.691, zone=2.326, loc=1.107 (loss dropping steadily).
+- T9 sim glue (`9623cd8`): `sample_location_mdn_for_rollout()` on PitchGPT runs the
+  AR fusion chain on captured trunk hidden + just-sampled factor IDs (no re-forward).
+  `build_step_features` accepts real (plate_x, plate_z) when provided.
 
-**RESUME AT T4** (the most intricate task — forward wiring): in `model/pitchgpt.py:forward`
-add head-level autoregressive conditioning (zone→velo→spin progressive fusion) + wire the
-LocationMDN (compute params on pitch positions, add `out["location_mdn"]`), make the AB head
-optional (`config.ab_outcome_head`). Confirm `FactorEmbeddings` attr names in
-`model/embeddings.py` (`zone_emb`/`velo_emb`/`spin_axis_proj`) and the `hidden_exec_full`
-var in forward. Then T5 dataset (x,z) target, T6 training loss (+MDN, result=0.3, drop AB,
-rare-type), **T7 = ~10h Modal train `small-fold0-v8`**, T8 calibrate (+MDN check), T9 sim
-glue (sample loc from MDN + native velo/spin into `hitter/rollout.py`), **T10 GATE: backtest
-must beat lookup 1.4435 / baseline 1.4631** (`scripts/hitter/run_backtest_modal.py`).
+**WAITING FOR T7 (~10h training), THEN:** T8 calibrate (pull checkpoint, temperature-scale
++ MDN distributional check) → **T10 GATE: backtest must beat lookup 1.4435 / baseline
+1.4631** (`scripts/hitter/run_backtest_modal.py`, n=800, n-paths=300).
 
 **Root cause being fixed:** simulator fed the cascade each pitch's ZONE CENTROID (borderline)
 not a real spot → over-swing → too few balls → walks 5.2% vs 9.3%. See the 🟢 section below.
