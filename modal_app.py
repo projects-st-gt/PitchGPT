@@ -84,6 +84,11 @@ def train_remote(
     type_focal_gamma: float = 0.0,     # focal loss on type head
     type_class_weight_alpha: float = 0.0,  # inverse-freq class weighting
     type_conditioned_heads: bool = False,  # ADR 013
+    location_mdn: bool = False,  # ADR-014 — MDN location head
+    autoregressive_exec_heads: bool = False,  # ADR-014 — full AR factor chain
+    ab_outcome_head: bool = True,  # ADR-014 — set False for v8
+    result_loss_weight: Optional[float] = None,  # override result head weight (v8: 0.3)
+    location_loss_weight: float = 1.0,  # MDN NLL weight
 ) -> dict:
     """Remote A100 training. Reads data from the mounted Volume, writes
     checkpoints back to the Volume. Returns the local-training summary dict.
@@ -116,6 +121,11 @@ def train_remote(
         type_focal_gamma=type_focal_gamma,
         type_class_weight_alpha=type_class_weight_alpha,
         type_conditioned_heads=type_conditioned_heads,
+        location_mdn=location_mdn,
+        autoregressive_exec_heads=autoregressive_exec_heads,
+        ab_outcome_head=ab_outcome_head,
+        result_loss_weight=result_loss_weight,
+        location_loss_weight=location_loss_weight,
     )
 
     # Make sure files we wrote to the Volume are flushed for the next call /
@@ -163,6 +173,11 @@ def main(
     type_focal_gamma: float = 0.0,     # focal loss on type head (0 = CE)
     type_class_weight_alpha: float = 0.0,  # inverse-freq class weighting
     type_conditioned_heads: bool = False,  # ADR 013
+    location_mdn: bool = False,  # ADR-014
+    autoregressive_exec_heads: bool = False,  # ADR-014
+    no_ab_outcome_head: bool = False,  # ADR-014 — v8 sets True
+    result_loss_weight: Optional[float] = None,  # v8: 0.3
+    location_loss_weight: float = 1.0,
 ):
     """Convenience entrypoint for `modal run modal_app.py`."""
     summary = train_remote.remote(
@@ -183,6 +198,11 @@ def main(
         type_focal_gamma=type_focal_gamma,
         type_class_weight_alpha=type_class_weight_alpha,
         type_conditioned_heads=type_conditioned_heads,
+        location_mdn=location_mdn,
+        autoregressive_exec_heads=autoregressive_exec_heads,
+        ab_outcome_head=not no_ab_outcome_head,
+        result_loss_weight=result_loss_weight,
+        location_loss_weight=location_loss_weight,
     )
     print("\nRemote training complete:")
     import json
