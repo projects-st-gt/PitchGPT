@@ -1,6 +1,31 @@
 # ContextSwitcher — Pick up where this session left off
 
-**Last updated**: 2026-06-05 — backtest LOSS root-caused → zone-CENTROID glue bug → small-v8 brainstorm next.
+**Last updated**: 2026-06-05 — small-v8 EXECUTION underway: Tasks 1–3 done; resume at Task 4.
+
+## 🟡 small-v8 EXECUTION IN PROGRESS (2026-06-05)
+
+**Plan:** `docs/superpowers/plans/2026-06-05-small-v8.md` (10 tasks, subagent-driven,
+TDD, ends at the backtest GATE). **Spec:** `docs/superpowers/specs/2026-06-05-small-v8-design.md`.
+**ADR:** `docs/decisions/014-...md`. Branch `hitter-swing-model` (NOT main; no worktree).
+
+**DONE (committed):**
+- T1 ADR-014 (`5612066`). T2 config flags (`6e1e80c`): `location_mdn`, `mdn_components=5`,
+  `mdn_logstd_floor=-2.5`, `autoregressive_exec_heads`, `ab_outcome_head` (all default
+  to v7 behavior so v7 ckpts still load). T3 `LocationMDN` head + 3 tests (`4cd0b56`),
+  device-safe nll fix (`ef1455e`). `tests/test_location_mdn.py` green.
+
+**RESUME AT T4** (the most intricate task — forward wiring): in `model/pitchgpt.py:forward`
+add head-level autoregressive conditioning (zone→velo→spin progressive fusion) + wire the
+LocationMDN (compute params on pitch positions, add `out["location_mdn"]`), make the AB head
+optional (`config.ab_outcome_head`). Confirm `FactorEmbeddings` attr names in
+`model/embeddings.py` (`zone_emb`/`velo_emb`/`spin_axis_proj`) and the `hidden_exec_full`
+var in forward. Then T5 dataset (x,z) target, T6 training loss (+MDN, result=0.3, drop AB,
+rare-type), **T7 = ~10h Modal train `small-fold0-v8`**, T8 calibrate (+MDN check), T9 sim
+glue (sample loc from MDN + native velo/spin into `hitter/rollout.py`), **T10 GATE: backtest
+must beat lookup 1.4435 / baseline 1.4631** (`scripts/hitter/run_backtest_modal.py`).
+
+**Root cause being fixed:** simulator fed the cascade each pitch's ZONE CENTROID (borderline)
+not a real spot → over-swing → too few balls → walks 5.2% vs 9.3%. See the 🟢 section below.
 
 ## 🟢 ROOT CAUSE FOUND: the zone-CENTROID location glue (2026-06-05)
 
