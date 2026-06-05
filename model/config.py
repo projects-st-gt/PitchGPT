@@ -128,6 +128,25 @@ class PitchGPTConfig:
     # for checkpoint back-compat; `train()` flag controls new runs.
     profile_film: bool = False
 
+    # --- v8: continuous location MDN + autoregressive factorization (ADR-014) ---
+    # Add a Mixture Density Network head that predicts the continuous (plate_x,
+    # plate_z) location of the next pitch as a K-Gaussian mixture, replacing the
+    # coarse 13-zone categorical. Default OFF so v7 checkpoints load unchanged.
+    location_mdn: bool = False
+    # Number of Gaussian components in the MDN mixture.
+    mdn_components: int = 5
+    # Floor on log-std output to prevent numerical collapse (~0.08 ft at -2.5).
+    mdn_logstd_floor: float = -2.5
+    # Autoregressive execution heads: zone→velo→spin→loc progressive fusion.
+    # Each downstream head conditions on the sampled/teacher-forced output of
+    # earlier heads (type already conditions heads via type_conditioned_heads).
+    # Default OFF for checkpoint back-compat.
+    autoregressive_exec_heads: bool = False
+    # AB-outcome head (the at-bat-level K/BB/1B/2B/3B/HR/out predictor). v8
+    # sets this False to drop it and redirect capacity to the MDN location head.
+    # Default True so all v7 checkpoints continue to build the head unchanged.
+    ab_outcome_head: bool = True
+
     # --- Profile dims (per profile_cache schema) ---
     # v5 (2026-05-14, 14-zone migration): heatmap/grid dims drop with
     # N_IN_ZONE_CELLS 25→9. Pitcher: 230 → 118 (lost 7×16 dead heatmap slots).
