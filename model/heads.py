@@ -183,3 +183,50 @@ class ABOutcomeHead(nn.Module):
     def forward(self, hidden_terminal: torch.Tensor) -> torch.Tensor:
         """hidden_terminal: (B, d_model) — only the terminal-pitch hidden states."""
         return self.proj(hidden_terminal)
+
+
+class LocationMDN(nn.Module):
+    """Mixture-of-Gaussians head over continuous (plate_x, plate_z).
+
+    Predicts K diagonal 2D Gaussians from a conditioning vector (trunk hidden +
+    the sampled type/zone/velo/spin embeddings). Trained by mixture NLL on the
+    real (plate_x, plate_z); sampled at rollout time to give the cascade a real
+    location (replacing the zone centroid).
+    """
+
+    def __init__(self, config: PitchGPTConfig, d_in: int):
+        super().__init__()
+        self.config = config
+        self.K = config.mdn_components
+        self.floor = config.mdn_logstd_floor
+        self.proj = nn.Linear(d_in, self.K * 5)   # per comp: weight(1)+mean(2)+log_std(2)
+        nn.init.normal_(self.proj.weight, mean=0.0, std=config.init_std)
+        nn.init.zeros_(self.proj.bias)
+
+    def forward(self, cond: torch.Tensor):
+        """cond (..., d_in) -> (log_w (...,K), mu (...,K,2), log_std (...,K,2))."""
+        o = self.proj(cond)
+        *lead, _ = o.shape
+        o = o.view(*lead, self.K, 5)
+        log_w = torch.log_softmax(o[..., 0], dim=-1)
+        mu = o[..., 1:3]
+        log_std = o[..., 3:5].clamp(min=self.floor, max=2.0)
+        return log_w, mu, log_std
+
+    def nll(self, log_w, mu, log_std, target):
+        """Mean mixture NLL. target (...,2). Returns scalar over the leading dims."""
+        t = target.unsqueeze(-2)                          # (...,1,2)
+        var = (2 * log_std).exp()
+        comp = -0.5 * (((t - mu) ** 2) / var + 2 * log_std + torch.log(torch.tensor(2 * torch.pi))).sum(-1)
+        logp = torch.logsumexp(log_w + comp, dim=-1)      # (...)
+        return -logp.mean()
+
+    def sample(self, log_w, mu, log_std, generator=None):
+        """Sample (...,2). Picks a component ~ exp(log_w), then a diagonal Gaussian."""
+        w = log_w.exp()
+        flat_w = w.reshape(-1, self.K)
+        idx = torch.multinomial(flat_w, 1, generator=generator).reshape(*w.shape[:-1])
+        mu_s = torch.gather(mu, -2, idx[..., None, None].expand(*idx.shape, 1, 2)).squeeze(-2)
+        ls_s = torch.gather(log_std, -2, idx[..., None, None].expand(*idx.shape, 1, 2)).squeeze(-2)
+        eps = torch.randn(mu_s.shape, generator=generator)
+        return mu_s + eps * ls_s.exp()
