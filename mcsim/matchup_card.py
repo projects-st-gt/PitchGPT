@@ -122,6 +122,8 @@ def _compute_cell(
     rng_seed: Optional[int],
     context: ReferenceContext,
     gate: PositivityGate,
+    outcome_model: str = "head",
+    hitter_ctx: dict | None = None,
 ) -> dict:
     """Roll out one (pitcher, batter) cell and pack its summary dict.
 
@@ -142,14 +144,18 @@ def _compute_cell(
         context=context,
         game_pk=game_pk,
     )
-    r = g_compute(
-        nuisance,
-        ab,
-        intervention_position=0,
-        intervention_type=None,  # natural mode — what the model expects, not do(·)
-        n_paths=n_paths,
-        rng_seed=rng_seed,
-    )
+    g_kwargs = dict(intervention_position=0, intervention_type=None,
+                    n_paths=n_paths, rng_seed=rng_seed)
+    if outcome_model == "hitter":
+        # pitchGPT picks pitches; the hitter cascade decides outcomes.
+        from hitter.rollout import build_cell_step_fn
+        step_fn = build_cell_step_fn(
+            hitter_ctx, pitcher_id=pitcher.id, batter_id=batter.id,
+            stand=batter.stand, throws=pitcher.throws, game_date=game_date,
+            ballpark_id=ballpark_id, umpire_id=umpire_id, catcher_id=catcher_id)
+        g_kwargs["outcome_model"] = "hitter"
+        g_kwargs["hitter_step_fn"] = step_fn
+    r = g_compute(nuisance, ab, **g_kwargs)
 
     # RV distribution from the per-path values (truncated paths are NaN).
     finite = r.run_value[np.isfinite(r.run_value)]
@@ -217,6 +223,8 @@ def compute_matchup_card(
     rng_seed: Optional[int] = None,
     context: Optional[ReferenceContext] = None,
     progress_every: Optional[int] = None,
+    outcome_model: str = "head",
+    hitter_ctx: dict | None = None,
 ) -> dict:
     """Compute one game's matchup card.
 
@@ -268,6 +276,8 @@ def compute_matchup_card(
                         rng_seed=seed,
                         context=context,
                         gate=gate,
+                        outcome_model=outcome_model,
+                        hitter_ctx=hitter_ctx,
                     )
                 )
                 cell_index += 1

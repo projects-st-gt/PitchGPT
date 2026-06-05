@@ -31,7 +31,7 @@ from mcsim.storage import (
     write_prediction,
 )
 
-DEFAULT_CKPT = Path("checkpoints_modal/tiny-fold0-v7/checkpoint_calibrated.pt")
+DEFAULT_CKPT = Path("checkpoints_modal/small-fold0-v7/checkpoint_calibrated.pt")
 
 
 def compute_ckpt_hash(ckpt_path: Path, *, n_chars: int = 16) -> str:
@@ -44,7 +44,8 @@ def compute_ckpt_hash(ckpt_path: Path, *, n_chars: int = 16) -> str:
     return h.hexdigest()[:n_chars]
 
 
-def _compute_one_game(nuisance, game, date: str, n_paths: int, rng_seed, progress_every=None):
+def _compute_one_game(nuisance, game, date: str, n_paths: int, rng_seed,
+                      progress_every=None, outcome_model="head", hitter_ctx=None):
     """Fetch both rosters for one game and compute its all-vs-all card.
 
     Shared by the sequential and parallel paths so they produce identical
@@ -67,6 +68,8 @@ def _compute_one_game(nuisance, game, date: str, n_paths: int, rng_seed, progres
         n_paths=n_paths,
         rng_seed=rng_seed,
         progress_every=progress_every,
+        outcome_model=outcome_model,
+        hitter_ctx=hitter_ctx,
     )
 
 
@@ -77,21 +80,29 @@ def _compute_one_game(nuisance, game, date: str, n_paths: int, rng_seed, progres
 # spawn re-imports this module, so the worker fns must live at module level.
 
 _WORKER_NUISANCE = None  # populated once per worker process by _init_worker
+_WORKER_HITTER_CTX = None  # cascade context (hitter mode only)
+_WORKER_OUTCOME_MODEL = "head"
 
 
-def _init_worker(ckpt_path_str: str) -> None:
+def _init_worker(ckpt_path_str: str, outcome_model: str = "head",
+                 hitter_dir: str = "checkpoints/hitter") -> None:
     import torch as _torch
 
     _torch.set_num_threads(1)
-    global _WORKER_NUISANCE
+    global _WORKER_NUISANCE, _WORKER_HITTER_CTX, _WORKER_OUTCOME_MODEL
     _WORKER_NUISANCE = NuisanceModels(Path(ckpt_path_str), device="cpu")
+    _WORKER_OUTCOME_MODEL = outcome_model
+    if outcome_model == "hitter":
+        from hitter.rollout import load_hitter_ctx
+        _WORKER_HITTER_CTX = load_hitter_ctx(hitter_dir)
 
 
 def _worker_compute_game(task):
     game, date, n_paths, rng_seed, progress_every = task
     try:
         card = _compute_one_game(
-            _WORKER_NUISANCE, game, date, n_paths, rng_seed, progress_every=progress_every)
+            _WORKER_NUISANCE, game, date, n_paths, rng_seed, progress_every=progress_every,
+            outcome_model=_WORKER_OUTCOME_MODEL, hitter_ctx=_WORKER_HITTER_CTX)
         return (game.game_pk, game.away_team, game.home_team, card, None)
     except Exception:
         return (game.game_pk, game.away_team, game.home_team, None, traceback.format_exc())
@@ -111,6 +122,8 @@ def run_matchup_cards(
     n_workers: int = 1,
     ckpt_path: "Path | None" = None,
     progress_every: "int | None" = None,
+    outcome_model: str = "head",
+    hitter_dir: str = "checkpoints/hitter",
 ) -> list[dict]:
     """Fetch the schedule for ``date``, compute one all-vs-all matchup card per
     game, and (unless dry_run) persist it. Returns the list of card payloads.
@@ -146,9 +159,10 @@ def run_matchup_cards(
 
         ctx = mp.get_context("spawn")
         tasks = [(g, date, n_paths, rng_seed, progress_every) for g in games]
-        print(f"parallel: {len(tasks)} games across {n_workers} workers (1 torch thread each)")
+        print(f"parallel: {len(tasks)} games across {n_workers} workers (1 torch thread each)"
+              f"  outcome_model={outcome_model}")
         with ctx.Pool(processes=n_workers, initializer=_init_worker,
-                      initargs=(str(ckpt_path),)) as pool:
+                      initargs=(str(ckpt_path), outcome_model, hitter_dir)) as pool:
             for game_pk, away, home, card, err in pool.imap_unordered(_worker_compute_game, tasks):
                 if err is not None:
                     print(f"  SKIP game_pk={game_pk}: worker error (see stderr)")
@@ -158,10 +172,16 @@ def run_matchup_cards(
                 cards.append(card)
         return cards
 
+    hitter_ctx = None
+    if outcome_model == "hitter":
+        from hitter.rollout import load_hitter_ctx
+        hitter_ctx = load_hitter_ctx(hitter_dir)
+
     for g in games:
         try:
             card = _compute_one_game(nuisance, g, date, n_paths, rng_seed,
-                                     progress_every=progress_every)
+                                     progress_every=progress_every,
+                                     outcome_model=outcome_model, hitter_ctx=hitter_ctx)
             _persist_and_log(g.game_pk, g.away_team, g.home_team, card)
             cards.append(card)
         except Exception as e:  # one bad game must not abort the batch
@@ -188,6 +208,9 @@ def main() -> None:
                          "at 1 torch thread; >1 needs the checkpoint on disk)")
     ap.add_argument("--progress-every", type=int, default=25,
                     help="print a per-game cell-progress line every N cells (0 to silence)")
+    ap.add_argument("--outcome-model", choices=["head", "hitter"], default="head",
+                    help="'head' = transformer outcome; 'hitter' = pitchGPT pitches + cascade outcomes")
+    ap.add_argument("--hitter-dir", default="checkpoints/hitter")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
@@ -211,6 +234,8 @@ def main() -> None:
         n_workers=args.n_workers,
         ckpt_path=args.ckpt,
         progress_every=(args.progress_every or None),
+        outcome_model=args.outcome_model,
+        hitter_dir=args.hitter_dir,
     )
     print(f"done: {len(cards)} card(s) for {args.date}")
 

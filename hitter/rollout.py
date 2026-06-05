@@ -128,13 +128,15 @@ def build_step_features(
     }
     for name, val in ctx_cat.items():
         cols[name] = np.full(n, int(val), "int32")
-    df = pd.DataFrame(cols)
+    # Build profile columns INTO the dict before constructing the frame —
+    # assigning them one-by-one afterward fragments the DataFrame (O(n²), slow
+    # per cell, warning flood).
     bvec = np.asarray(batter_vec, "float32"); pvec = np.asarray(pitcher_stuff_vec, "float32")
     for i in range(len(bvec)):
-        df[f"b{i}"] = bvec[i]
+        cols[f"b{i}"] = np.full(n, bvec[i], "float32")
     for i in range(len(pvec)):
-        df[f"p{i}"] = pvec[i]
-    return df
+        cols[f"p{i}"] = np.full(n, pvec[i], "float32")
+    return pd.DataFrame(cols)
 
 
 def make_hitter_step_fn(hitter_model, xwoba_to_outcome, *, batter_vec,
@@ -172,3 +174,55 @@ def make_hitter_step_fn(hitter_model, xwoba_to_outcome, *, batter_vec,
         rp[:, 4] *= keep; rp[:, 5] *= keep; rp[:, 6] *= keep      # scale in-play down
         return rp, outcome5
     return step
+
+
+# ---------------------------------------------------------------------------
+# Matchup-card integration: load the cascade context once, build per-cell step fns
+# ---------------------------------------------------------------------------
+
+def load_hitter_ctx(model_dir: str = "checkpoints/hitter", fold_id: int = 0) -> dict:
+    """Load everything a worker needs to build per-cell cascade step fns once:
+    the HitterModel, the xwOBA→outcome map, zone centroids, and profile caches.
+    """
+    import json
+    from data.profile_cache_loader import ProfileCache
+    from hitter.model import HitterModel
+    from hitter.compose import xwoba_outcome_fn
+    hm = HitterModel(model_dir)
+    xfn = xwoba_outcome_fn(json.load(open(f"{model_dir}/xwoba_outcome_map.json")))
+    cent = {int(k): v for k, v in
+            json.load(open(f"{model_dir}/zone_centroids.json")).items()}
+    return {
+        "hm": hm, "xfn": xfn, "cent": cent,
+        "bc": ProfileCache(role="batter", fold_id=fold_id),
+        "pc": ProfileCache(role="pitcher", fold_id=fold_id),
+    }
+
+
+def build_cell_step_fn(ctx: dict, *, pitcher_id: int, batter_id: int,
+                       stand: str, throws: str, game_date: str,
+                       ballpark_id: int = 0, umpire_id: int = 0,
+                       catcher_id: int = 0):
+    """Build the hitter_step_fn for one matchup cell from a loaded ``ctx``.
+
+    Pulls the batter & pitcher profiles as-of ``game_date`` (leakage-safe), derives
+    the pitcher's per-type velo/spin means, and closes over the cascade.
+    """
+    import pandas as pd
+    from data.profile_cache import PITCHER_FEATURE_INDEX as PFI
+    from hitter.train import PITCHER_STUFF_FEATURES
+    _PT = ("FF", "SI", "FC", "SL", "CU", "CH", "FS")
+
+    asof = pd.Timestamp(game_date)
+    bv = np.asarray(ctx["bc"].lookup(int(batter_id), asof, 1, as_of_fallback=True)["vector"], np.float32)
+    pf = np.asarray(ctx["pc"].lookup(int(pitcher_id), asof, 1, as_of_fallback=True)["vector"], np.float32)
+    pstuff = pf[[PFI[f] for f in PITCHER_STUFF_FEATURES]]
+    velo = {j + 1: float(pf[PFI[f"mean_velo_{t}"]]) for j, t in enumerate(_PT)}
+    spin = {j + 1: float(pf[PFI[f"mean_spin_{t}"]]) for j, t in enumerate(_PT)}
+    return make_hitter_step_fn(
+        ctx["hm"], ctx["xfn"], batter_vec=bv, pitcher_stuff_vec=pstuff,
+        velo_by_type=velo, spin_by_type=spin,
+        same_hand=int(str(stand) == str(throws)), centroids=ctx["cent"],
+        ctx_cat={"umpire_id": int(umpire_id), "catcher_id": int(catcher_id),
+                 "ballpark_id": int(ballpark_id), "roof_state": 1, "temp_bucket": 4},
+        foul_rate_fn=ctx["hm"].foul_rate)

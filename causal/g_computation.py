@@ -605,11 +605,11 @@ def g_compute(
             # build_step_features -> cascade.predict_cascade -> the translator
             # (cascade_to_result_probs). SEQUENCE is preserved: the previous
             # pitch (step-1) is passed as the lag feature.
-            tids = full["type"][:, step].numpy()
-            zids = full["zone"][:, step].numpy()
-            ptids = (full["type"][:, step - 1].numpy() if step > 0
+            tids = full["type"][:, step].cpu().numpy()
+            zids = full["zone"][:, step].cpu().numpy()
+            ptids = (full["type"][:, step - 1].cpu().numpy() if step > 0
                      else np.zeros(N, dtype=np.int64))
-            pzids = (full["zone"][:, step - 1].numpy() if step > 0
+            pzids = (full["zone"][:, step - 1].cpu().numpy() if step > 0
                      else np.full(N, -1, dtype=np.int64))
             nprev = np.full(N, step, dtype=np.int64)
             rp_np, oc5 = hitter_step_fn(tids, zids, balls, strikes, ptids, pzids, nprev)
