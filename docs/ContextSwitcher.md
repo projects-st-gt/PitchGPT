@@ -2,6 +2,46 @@
 
 **Last updated**: 2026-06-05 — small-v8 EXECUTION underway: Tasks 1–3 done; resume at Task 4.
 
+## 🧵 THE THREAD — why we're building small-v8 (read this first)
+
+The whole chain this session (2026-06-05), so a fresh reader knows *why*:
+
+1. **App A** (full-game sim → projected score + win prob, backtested vs real finals)
+   needs trustworthy **per-PA fuel** = the **pitchGPT + hitter-cascade** matchup cards
+   (the predicted K/BB/1B/2B/3B/HR/out distribution per pitcher×batter).
+2. User flagged a suspiciously hot card cell (Jackson **Merrill 1.013 OPS vs Devin
+   Williams**). Pressure-testing it surfaced that the cards use the **pitchGPT+cascade**
+   path, which had **NEVER been backtested** — only the count-only *lookup* path had
+   (1.405 < 1.452 baseline). So we didn't actually know if pitchGPT's pitch selection
+   helped.
+3. Built + ran the **3-way per-PA backtest** (real held-out 2024H2+2025 PAs, log-loss).
+   Result: **pitchGPT+cascade LOST** to both the lookup AND the league baseline — it
+   **under-reports walks (5.2% vs 9.3% real)**. (Details in the 🔴 section.)
+4. **Root-caused** the walk deficit to the **zone-CENTROID location glue** in the
+   simulator — NOT the model. pitchGPT's pitch prediction is well-calibrated on real
+   data; the simulator was feeding the cascade each pitch's zone *center* instead of a
+   real (x,z), making out-of-zone pitches look borderline → over-swing → too few balls
+   → too few walks (compounds to ~half). (Details in the 🟢 section.)
+5. **Fix = small-v8:** retrain pitchGPT with a **continuous-location MDN head** so it
+   emits a real (x,z) the cascade eats directly (no centroid), + autoregressive pitch
+   factorization, drop the unused AB-outcome head, keep result head as light aux, native
+   velo/spin into the cascade, rare-type loss tuning, recalibrate. Currently EXECUTING
+   (🟡 section; T1–T3 committed, resume at T4).
+6. **App A stays PAUSED** until small-v8 passes the backtest GATE (beat lookup **1.4435**
+   / baseline **1.4631** on the same harness). Then App A unblocks with trusted fuel.
+
+**Standing user constraints (also in memory):** pitchGPT IS the fuel — NEVER substitute
+the count-only lookup. Use very plain language. Pressure-test claims proactively. Keep
+THIS doc live. Add progress trackers (i/N + ETA) to every long job.
+
+**What was BUILT this session (all committed, branch `hitter-swing-model`):** the 3-way
+backtest harness (`hitter/backtest.py` + tests, `scripts/hitter/run_backtest_modal.py`,
+`modal_app.py:backtest_remote`, cap 10); 2 root-cause diagnostics
+(`scripts/hitter/diagnose_glue_isolation.py`, `diagnose_pitch_outcomes.py`); the App A
+spec; the small-v8 spec + ADR-014 + plan; and small-v8 Tasks 1–3.
+
+---
+
 ## 🟡 small-v8 EXECUTION IN PROGRESS (2026-06-05)
 
 **Plan:** `docs/superpowers/plans/2026-06-05-small-v8.md` (10 tasks, subagent-driven,
@@ -100,8 +140,8 @@ nodes on pitchGPT's pitch LOCATIONS); the map only affects the hit-type split (t
 
 **IMPLICATION:** App A is PAUSED — do not build the game sim on this fuel until the
 pitchGPT path beats baseline. We do NOT swap to lookup (pitchGPT is the fuel — see
-memory). Next = **debug the walk under-prediction** (pitch-location dist vs real /
-cascade take→ball nodes / count-tree walk termination), fix, re-run the backtest.
+memory). The walk under-prediction was debugged → **root cause = zone-centroid glue
+(🟢 section); fix = small-v8 (🟡 section)**. Re-run this backtest at T10 as the GATE.
 
 **The backtest is now a repeatable scorecard:**
 `python -m scripts.hitter.run_backtest_modal --n 800 --n-paths 300` (Modal, cap 10;
