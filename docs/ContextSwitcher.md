@@ -1,8 +1,53 @@
 # ContextSwitcher — Pick up where this session left off
 
-**Last updated**: 2026-06-03 (late) — hitter-model build handed off.
+**Last updated**: 2026-06-05 — pitchGPT+cascade per-PA backtest DONE (it LOST).
 
-## ⭐⭐⭐⭐⭐ APP A — FULL-GAME SIM ENGINE (brainstorm, 2026-06-05) — NEXT BIG BUILD
+## 🔴🔴🔴 pitchGPT+cascade BACKTEST — IT LOSES TO LOOKUP *AND* BASELINE (2026-06-05)
+
+**The pitchGPT pitch source does NOT beat the simple count-only lookup, and is
+WORSE than the league-average baseline** on per-PA outcome log-loss. This was the
+never-run experiment (commit 50e44b0 had marked it TODO; only lookup had ever
+been backtested at 1.405). Now run, three-way, on the SAME 800 held-out 2024H2+
+2025 PAs (lower=better):
+
+| pitch source        | log-loss | 95% CI            |
+|---------------------|----------|-------------------|
+| lookup + cascade    | **1.4435** | [1.387, 1.499]  |
+| baseline (league)   | 1.4631   | [1.409, 1.518]    |
+| **pitchGPT + cascade** | **1.4846** | [1.415, 1.565] |
+
+Lookup reproduced its known win over baseline (≈0.02) → harness is sound (anchor
+n=300 lookup = 1.4073 ≈ the historical 1.405). **pitchGPT is the worst of three.**
+
+**WHY (calibration-in-aggregate, mean pred vs real):** the killer is **walks —
+pitchGPT predicts 5.2% vs 9.3% real (≈half)**; also over-predicts K (+2.0pp) and
+2B (+2.1pp). **HR (0.043 vs 0.043) and out are well-calibrated in aggregate** — so
+it's NOT uniform HR inflation; it's a PLATE-DISCIPLINE problem (pitchGPT throws too
+few balls → too few walks, too many K/contact). The earlier "Merrill 1.013 hot OPS"
+is the per-matchup face of this.
+
+**Fairness caveat:** the shared xwOBA→outcome map was tuned on the lookup pitch
+mix, but the dominant BB/K errors are UPSTREAM of that map (swing/take/called-strike
+nodes on pitchGPT's pitch LOCATIONS); the map only affects the hit-type split (the
+2B miss). So the loss is a genuine pitchGPT-path problem, not just a map artifact.
+
+**IMPLICATION:** App A is PAUSED — do not build the game sim on this fuel until the
+pitchGPT path beats baseline. We do NOT swap to lookup (pitchGPT is the fuel — see
+memory). Next = **debug the walk under-prediction** (pitch-location dist vs real /
+cascade take→ball nodes / count-tree walk termination), fix, re-run the backtest.
+
+**The backtest is now a repeatable scorecard:**
+`python -m scripts.hitter.run_backtest_modal --n 800 --n-paths 300` (Modal, cap 10;
+lookup+baseline local). Pure pieces in `hitter/backtest.py` (+ tests); Modal fn
+`modal_app.py:backtest_remote`. Sanity: `--sanity-local` (no Modal). The driver has
+live progress trackers (phase banners + i/N + ETA).
+
+---
+
+## ⭐⭐⭐⭐⭐ APP A — FULL-GAME SIM ENGINE (brainstorm, 2026-06-05) — PAUSED (fuel fails backtest)
+**Spec written + reviewed:** `docs/superpowers/specs/2026-06-05-app-a-full-game-sim-design.md`.
+Engine is fuel-agnostic and buildable, but per the backtest above the pitchGPT
+per-PA fuel is miscalibrated — fix the fuel before building/ trusting App A numbers.
 
 **Goal:** simulate a whole game from 0-0 top-1st ~10K times → **projected score +
 win probability**, pre-game, backtested against real finals. Drives a daily

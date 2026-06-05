@@ -40,7 +40,7 @@ image = (
         "pyarrow>=15",
         "numpy>=1.26,<2.1",
         "tqdm>=4.66",
-        "scikit-learn>=1.3",
+        "scikit-learn==1.8.0",
     )
     .add_local_python_source("model", "data", "scripts")
 )
@@ -196,13 +196,13 @@ def main(
 card_image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install("torch>=2.4", "pandas>=2.2", "pyarrow>=15", "numpy>=1.26,<2.1",
-                 "scikit-learn>=1.3", "xgboost>=2.0", "joblib", "requests>=2.31",
+                 "scikit-learn==1.8.0", "xgboost>=2.0", "joblib", "requests>=2.31",
                  "tqdm>=4.66")
     .add_local_python_source("model", "data", "scripts", "hitter", "mcsim", "causal")
 )
 
 
-@app.function(image=card_image, gpu="L4", volumes={"/data": volume},
+@app.function(image=card_image, gpu="T4", volumes={"/data": volume},
               timeout=60 * 60 * 2)
 def card_remote(task: dict) -> dict:
     """Compute one game's pitchGPT+cascade matchup card on a GPU. ``task`` carries
@@ -234,8 +234,144 @@ def card_remote(task: dict) -> dict:
         home_pitchers=home_p, away_pitchers=away_p,
         home_lineup=home_h, away_lineup=away_h,
         n_paths=task.get("n_paths", 300), rng_seed=task.get("rng_seed", 1),
-        outcome_model="hitter", hitter_ctx=ctx)
+        outcome_model="hitter", hitter_ctx=ctx,
+        progress_every=task.get("progress_every", 50))
     card["_game_pk"] = task["game_pk"]
     card["_away"] = task["away_team"]
     card["_home"] = task["home_team"]
+    card["_date"] = task["date"]
     return card
+
+
+@app.function(image=card_image, gpu="T4", volumes={"/data": volume}, timeout=900)
+def bench_cell(n_paths: int = 500, n_cells: int = 3) -> dict:
+    """Time a single matchup cell at n_paths on T4 — to size the real per-cell cost
+    + per-game ETA before committing to a full run."""
+    import os, time
+    os.chdir("/")
+    from pathlib import Path
+    import torch
+    from causal.nuisance import NuisanceModels
+    from mcsim.matchup_card import compute_matchup_card, PitcherSpec, BatterSpec
+    from hitter.rollout import load_hitter_ctx
+
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    t = time.time()
+    nz = NuisanceModels(
+        Path("/data/checkpoints/small-fold0-v7/checkpoint_calibrated.pt"), device=dev)
+    ctx = load_hitter_ctx("/data/checkpoints/hitter", profiles_dir="/data/profiles")
+    load_s = time.time() - t
+    bats = [BatterSpec(id=b, name=str(b), stand="R")
+            for b in [592450, 665489, 660271][:n_cells]]
+    t0 = time.time()
+    card = compute_matchup_card(
+        nz, game_pk=1, game_date="2024-08-01", home_team="A", away_team="B",
+        home_pitchers=[PitcherSpec(id=640455, name="P", throws="L", is_starter=True)],
+        away_pitchers=[], home_lineup=[], away_lineup=bats,
+        n_paths=n_paths, rng_seed=1, outcome_model="hitter", hitter_ctx=ctx)
+    dt = time.time() - t0
+    return {"device": dev, "model+cascade_load_s": round(load_s, 1),
+            "n_cells": n_cells, "total_s": round(dt, 1),
+            "per_cell_s": round(dt / n_cells, 1),
+            "est_per_game_min": round(dt / n_cells * 338 / 60, 1),
+            "sample_ops": [round(c["predicted_ops"], 3)
+                           for half in card["grid"] for cell in half.get("cells", [])
+                           for c in [cell]][:3] if "grid" in card else "n/a"}
+
+
+# ---- Finer-grained fan-out: one work unit per PITCHER ROW -------------------
+# Same cells, same paths, same numbers — just sliced so Modal parallelizes ~600
+# small units instead of 24 big games (wall-clock ~30-60 min vs ~10h). Model +
+# cascade load ONCE per warm container (module globals persist across .map inputs)
+# so cost stays flat.
+_ROW_NZ = None
+_ROW_CTX = None
+
+
+# ---- Per-PA backtest fan-out: pitchGPT+cascade outcome dist for real PAs -----
+# One Modal task = a CHUNK of held-out PAs. Each PA is rolled out at NEUTRAL 0-0
+# context (apples-to-apples with the lookup count-tree) via _compute_cell. Model +
+# cascade load ONCE per warm container (module globals). Capped at 10 containers to
+# respect the account plan. Returns [{idx, dist}] so the local driver scores all
+# three pitch sources on the identical PA sample.
+_BT_NZ = None
+_BT_CTX = None
+
+
+@app.function(image=card_image, gpu="T4", volumes={"/data": volume},
+              timeout=60 * 60, max_containers=10)
+def backtest_remote(task: dict) -> list[dict]:
+    """Roll out pitchGPT+cascade per-PA outcome dists for a chunk of real PAs.
+
+    ``task = {"specs": [{idx, pitcher_id, batter_id, throws, stand, game_date,
+    game_pk}, ...], "n_paths": int, "rng_seed": int}``. Returns
+    ``[{"idx": int, "dist": {7-class outcome dist}}]``.
+    """
+    import os
+    os.chdir("/")
+    global _BT_NZ, _BT_CTX
+    from pathlib import Path
+    import torch
+    from causal.nuisance import NuisanceModels
+    from causal.positivity import PositivityGate
+    from mcsim.matchup_card import _compute_cell, PitcherSpec, BatterSpec
+    from mcsim.state import ReferenceContext
+    from hitter.rollout import load_hitter_ctx
+
+    if _BT_NZ is None:                       # load once per warm container
+        dev = "cuda" if torch.cuda.is_available() else "cpu"
+        _BT_NZ = NuisanceModels(
+            Path("/data/checkpoints/small-fold0-v7/checkpoint_calibrated.pt"), device=dev)
+        _BT_CTX = load_hitter_ctx("/data/checkpoints/hitter", profiles_dir="/data/profiles")
+
+    gate = PositivityGate()
+    context = ReferenceContext()             # neutral 0-0, empty bases
+    n_paths = task["n_paths"]
+    base_seed = task["rng_seed"]
+    out = []
+    for j, s in enumerate(task["specs"]):
+        pitcher = PitcherSpec(id=int(s["pitcher_id"]), name=str(s["pitcher_id"]),
+                              throws=s["throws"] if s["throws"] in ("R", "L") else "R")
+        batter = BatterSpec(id=int(s["batter_id"]), name=str(s["batter_id"]),
+                            stand=s["stand"] if s["stand"] in ("R", "L") else "R")
+        cell = _compute_cell(
+            _BT_NZ, pitcher=pitcher, batter=batter, game_date=s["game_date"],
+            game_pk=int(s["game_pk"]), ballpark_id=0, umpire_id=0, catcher_id=0,
+            n_paths=n_paths, rng_seed=base_seed + j, context=context, gate=gate,
+            outcome_model="hitter", hitter_ctx=_BT_CTX)
+        out.append({"idx": int(s["idx"]), "dist": cell["predicted_outcome_dist"]})
+    return out
+
+
+@app.function(image=card_image, gpu="T4", volumes={"/data": volume}, timeout=60 * 40)
+def row_remote(task: dict) -> dict:
+    """Compute ONE pitcher's row of cells (pitcher x opposing lineup). Returns the
+    row dict + (game_pk, date) so the local driver merges rows into game cards."""
+    import os
+    os.chdir("/")
+    global _ROW_NZ, _ROW_CTX
+    from pathlib import Path
+    import torch
+    from causal.nuisance import NuisanceModels
+    from causal.positivity import PositivityGate
+    from mcsim.matchup_card import _compute_cell
+    from mcsim.state import ReferenceContext
+    from hitter.rollout import load_hitter_ctx
+
+    if _ROW_NZ is None:                       # load once per warm container
+        dev = "cuda" if torch.cuda.is_available() else "cpu"
+        _ROW_NZ = NuisanceModels(
+            Path("/data/checkpoints/small-fold0-v7/checkpoint_calibrated.pt"), device=dev)
+        _ROW_CTX = load_hitter_ctx("/data/checkpoints/hitter", profiles_dir="/data/profiles")
+
+    pitcher = task["pitcher"]; gate = PositivityGate(); context = ReferenceContext()
+    cells = []
+    for i, batter in enumerate(task["lineup"]):
+        cells.append(_compute_cell(
+            _ROW_NZ, pitcher=pitcher, batter=batter, game_date=task["date"],
+            game_pk=task["game_pk"], ballpark_id=0, umpire_id=0, catcher_id=0,
+            n_paths=task["n_paths"], rng_seed=task["rng_seed"] + i, context=context,
+            gate=gate, outcome_model="hitter", hitter_ctx=_ROW_CTX))
+    row = {"pitcher_id": pitcher.id, "name": pitcher.name, "team": task["team"],
+           "throws": pitcher.throws, "is_starter": pitcher.is_starter, "cells": cells}
+    return {"game_pk": task["game_pk"], "date": task["date"], "row": row}
