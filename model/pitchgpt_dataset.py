@@ -132,7 +132,8 @@ REQUIRED_AUG_COLS = (
     {"game_pk", "at_bat_number", "pitch_number", "game_date",
      "pitcher", "batter",
      "spin_axis_sin", "spin_axis_cos",
-     "description", "events"}
+     "description", "events",
+     "plate_x", "plate_z"}
     | set(PITCH_FACTOR_COLS_INT.values())
     | set(CATEGORICAL_CTX_COLS.values())
 )
@@ -315,6 +316,16 @@ class PitchGPTAtBatDataset(Dataset):
             classify_ab_outcome(last.get("events")), dtype=torch.long
         )
 
+        # Location target for the MDN head: real (plate_x, plate_z), left-shifted.
+        # Position t predicts pitch t+1's landing coordinates. Last position gets
+        # NaN (no successor). The MDN NLL uses torch.isfinite() to skip NaN positions.
+        loc = torch.tensor(
+            rows[["plate_x", "plate_z"]].to_numpy(dtype=np.float32),
+            dtype=torch.float32,
+        )  # (T, 2)
+        loc_target = torch.full((T, 2), float("nan"), dtype=torch.float32)
+        loc_target[:-1] = loc[1:]  # position t predicts pitch t+1's location
+
         return {
             "pitcher_profile": torch.as_tensor(pitcher_profile, dtype=torch.float32),
             "batter_profile": torch.as_tensor(batter_profile, dtype=torch.float32),
@@ -326,6 +337,7 @@ class PitchGPTAtBatDataset(Dataset):
                 "propensity": propensity_targets,
                 "result": result_target,
                 "ab_outcome": ab_outcome_target,
+                "location": loc_target,
             },
             "padding_mask": torch.ones(T, dtype=torch.bool),
         }
@@ -419,6 +431,17 @@ def collate_pitchgpt_at_bats(batch: list[dict]) -> dict:
     )
     ab_outcome_targets = torch.stack([b["targets"]["ab_outcome"] for b in batch])
 
+    # Location MDN target: (T, 2) float per item; pad with NaN so the MDN NLL
+    # loss (which uses torch.isfinite()) naturally skips padded positions.
+    loc_rows = []
+    for b in batch:
+        lt = b["targets"]["location"]
+        pad_n = max_T - lt.shape[0]
+        if pad_n > 0:
+            lt = torch.cat([lt, torch.full((pad_n, 2), float("nan"), dtype=lt.dtype)], dim=0)
+        loc_rows.append(lt)
+    location_targets = torch.stack(loc_rows)  # (B, max_T, 2)
+
     padding_mask = torch.zeros(B, max_T, dtype=torch.bool)
     for i, b in enumerate(batch):
         padding_mask[i, : len(b["padding_mask"])] = True
@@ -434,6 +457,7 @@ def collate_pitchgpt_at_bats(batch: list[dict]) -> dict:
             "propensity": propensity_targets,
             "result": result_targets,
             "ab_outcome": ab_outcome_targets,
+            "location": location_targets,
         },
         "padding_mask": padding_mask,
     }

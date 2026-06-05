@@ -198,6 +198,11 @@ def build_synthetic_ab(
         "spin_axis_sin": 0.0,
         "spin_axis_cos": 0.0,
 
+        # Location columns — NaN for a synthetic AB: no real pitch has landed yet.
+        # The MDN loss uses torch.isfinite() to skip these positions.
+        "plate_x": float("nan"),
+        "plate_z": float("nan"),
+
         # Categorical context columns the dataset reads at the AB level.
         CATEGORICAL_CTX_COLS["p_throws"]: _handedness_id(pitcher_throws),
         CATEGORICAL_CTX_COLS["stand"]: _handedness_id(batter_stand),
