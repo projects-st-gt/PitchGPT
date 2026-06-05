@@ -94,6 +94,8 @@ def main() -> None:
     ap.add_argument("--standardize", action="store_true", default=True,
                     help="apply ProfileStandardizer (matches the 'std' training recipe)")
     ap.add_argument("--no-standardize", dest="standardize", action="store_false")
+    ap.add_argument("--mdn-check", action="store_true",
+                    help="run the MDN distributional check (v8 checkpoint)")
     args = ap.parse_args()
 
     device = torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")
@@ -118,8 +120,14 @@ def main() -> None:
 
     NC = PitchGPT.N_CONTEXT_TOKENS
     PROP_HEADS = ["type", "zone", "velo", "spin_rate"]
-    # accumulators: head -> (list of logit rows, list of target ints)
-    bucket: dict[str, list] = {h: [[], []] for h in PROP_HEADS + ["result", "ab_outcome"]}
+    has_ab_head = getattr(cfg, "ab_outcome_head", True)
+    all_heads = PROP_HEADS + ["result"] + (["ab_outcome"] if has_ab_head else [])
+    bucket: dict[str, list] = {h: [[], []] for h in all_heads}
+
+    # MDN distributional check accumulators
+    has_mdn = getattr(cfg, "location_mdn", False)
+    mdn_sampled_x: list[np.ndarray] = []
+    mdn_real_x: list[np.ndarray] = []
 
     with torch.no_grad():
         for batch in loader:
@@ -128,32 +136,40 @@ def main() -> None:
                 pitcher_profile=bd["pitcher_profile"], batter_profile=bd["batter_profile"],
                 categorical_context=bd["categorical_context"], pitch_factors=bd["pitch_factors"],
                 intended_actions=bd["intended_actions"], padding_mask=bd["padding_mask"],
-                arsenal=bd.get("arsenal"),  # ADR 009 — required when the checkpoint has arsenal_per_pitch
+                arsenal=bd.get("arsenal"),
             )
             pad = batch["padding_mask"]  # (B, T) bool
-            # ---- propensity factor heads (pitch positions, drop context tokens) ----
             for h in PROP_HEADS:
-                lg = out["propensity"][h][:, NC:, :].cpu()              # (B, T, C)
-                tg = batch["targets"]["propensity"][h]                  # (B, T), -100 padded
+                lg = out["propensity"][h][:, NC:, :].cpu()
+                tg = batch["targets"]["propensity"][h]
                 mask = tg != -100
                 bucket[h][0].append(lg[mask]); bucket[h][1].append(tg[mask])
-            # ---- result head (pitch positions) ----
-            lg = out["result"].cpu()                                    # (B, T, 7)
-            tg = batch["targets"]["result"]                             # (B, T), -100 padded
+            lg = out["result"].cpu()
+            tg = batch["targets"]["result"]
             mask = tg != -100
             bucket["result"][0].append(lg[mask]); bucket["result"][1].append(tg[mask])
-            # ---- AB-outcome head (terminal pitch of each AB) ----
-            lengths = pad.sum(dim=1)                                    # (B,)
-            term_idx = (lengths - 1).clamp(min=0)
-            lg_all = out["ab_outcome_per_pos"].cpu()                    # (B, T, 7)
-            term_lg = lg_all[torch.arange(lg_all.size(0)), term_idx]    # (B, 7)
-            tg = batch["targets"]["ab_outcome"]                         # (B,)
-            mask = tg != -100
-            bucket["ab_outcome"][0].append(term_lg[mask]); bucket["ab_outcome"][1].append(tg[mask])
+            if has_ab_head and "ab_outcome_per_pos" in out:
+                lengths = pad.sum(dim=1)
+                term_idx = (lengths - 1).clamp(min=0)
+                lg_all = out["ab_outcome_per_pos"].cpu()
+                term_lg = lg_all[torch.arange(lg_all.size(0)), term_idx]
+                tg = batch["targets"]["ab_outcome"]
+                mask = tg != -100
+                bucket["ab_outcome"][0].append(term_lg[mask]); bucket["ab_outcome"][1].append(tg[mask])
+
+            if has_mdn and args.mdn_check and "location_mdn" in out:
+                lm = out["location_mdn"]
+                loc_tgt = batch["targets"]["location"]  # (B, T, 2)
+                valid = torch.isfinite(loc_tgt).all(dim=-1)
+                if valid.any():
+                    s = model.location_mdn.sample(
+                        lm["log_w"][valid], lm["mu"][valid], lm["log_std"][valid])
+                    mdn_sampled_x.append(s[:, 0].cpu().numpy())
+                    mdn_real_x.append(loc_tgt[valid][:, 0].numpy())
 
     print(f"\n{'head':<12} {'n':>9}  {'NLL_before':>10} {'NLL_after':>10}  {'ECE_before':>10} {'ECE_after':>10}  {'acc':>7}  {'T':>7}")
     temps: dict[str, float] = {}
-    for h in PROP_HEADS + ["result", "ab_outcome"]:
+    for h in all_heads:
         logits = torch.cat(bucket[h][0]).float()
         targets = torch.cat(bucket[h][1]).long()
         if len(targets) == 0:
@@ -168,7 +184,16 @@ def main() -> None:
         print(f"{h:<12} {len(targets):>9,}  {nll(logits, targets):>10.4f} {nll(logits, targets, T):>10.4f}  "
               f"{ece_equal_mass(p0, tnp):>10.4f} {ece_equal_mass(p1, tnp):>10.4f}  {acc:>7.4f}  {T:>7.4f}")
 
-    # save a NEW checkpoint with temperatures added; original untouched
+    if has_mdn and args.mdn_check and mdn_sampled_x:
+        sx = np.concatenate(mdn_sampled_x)
+        rx = np.concatenate(mdn_real_x)
+        print(f"\n--- MDN distributional check ({len(sx):,} pitches) ---")
+        print(f"  sampled mean |plate_x| = {np.abs(sx).mean():.3f}  (real {np.abs(rx).mean():.3f})")
+        print(f"  sampled frac |plate_x|>1.1 = {(np.abs(sx) > 1.1).mean():.3f}  (real {(np.abs(rx) > 1.1).mean():.3f})")
+        from scipy.stats import ks_2samp
+        ks_stat, ks_p = ks_2samp(sx, rx)
+        print(f"  KS plate_x: stat={ks_stat:.4f}  p={ks_p:.4g}")
+
     out_path = args.ckpt.with_name("checkpoint_calibrated.pt")
     ckpt["temperatures"] = temps
     ckpt["calibration_val_end"] = VAL_END
