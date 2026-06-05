@@ -17,6 +17,8 @@ Per the architecture brainstorm:
 
 from __future__ import annotations
 
+import math
+
 import torch
 import torch.nn as nn
 
@@ -217,7 +219,7 @@ class LocationMDN(nn.Module):
         """Mean mixture NLL. target (...,2). Returns scalar over the leading dims."""
         t = target.unsqueeze(-2)                          # (...,1,2)
         var = (2 * log_std).exp()
-        comp = -0.5 * (((t - mu) ** 2) / var + 2 * log_std + torch.log(torch.tensor(2 * torch.pi))).sum(-1)
+        comp = -0.5 * (((t - mu) ** 2) / var + 2 * log_std + math.log(2 * math.pi)).sum(-1)
         logp = torch.logsumexp(log_w + comp, dim=-1)      # (...)
         return -logp.mean()
 
