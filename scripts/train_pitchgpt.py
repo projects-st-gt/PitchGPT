@@ -223,19 +223,43 @@ def compute_losses(
     )
 
     # AB outcome — select terminal-pitch prediction per row.
-    valid_lengths = batch["padding_mask"].sum(dim=1)  # (B,)
-    has_pitches = valid_lengths > 0
-    if has_pitches.any():
-        terminal_pos = (valid_lengths - 1).clamp(min=0)
-        idx_batch = torch.arange(out["ab_outcome_per_pos"].shape[0], device=type_loss.device)
-        ab_logits = out["ab_outcome_per_pos"][idx_batch, terminal_pos, :]
-        ab_loss = F.cross_entropy(
-            ab_logits[has_pitches],
-            batch["targets"]["ab_outcome"][has_pitches],
-            ignore_index=-100,
-        )
+    # v8 drops this head entirely (cfg.ab_outcome_head=False) to redirect
+    # capacity to the MDN location head; guard the loss accordingly.
+    if cfg.ab_outcome_head and "ab_outcome_per_pos" in out:
+        valid_lengths = batch["padding_mask"].sum(dim=1)  # (B,)
+        has_pitches = valid_lengths > 0
+        if has_pitches.any():
+            terminal_pos = (valid_lengths - 1).clamp(min=0)
+            idx_batch = torch.arange(out["ab_outcome_per_pos"].shape[0], device=type_loss.device)
+            ab_logits = out["ab_outcome_per_pos"][idx_batch, terminal_pos, :]
+            ab_loss = F.cross_entropy(
+                ab_logits[has_pitches],
+                batch["targets"]["ab_outcome"][has_pitches],
+                ignore_index=-100,
+            )
+        else:
+            ab_loss = torch.tensor(0.0, device=type_loss.device)
     else:
         ab_loss = torch.tensor(0.0, device=type_loss.device)
+
+    # Location MDN NLL loss (ADR-014).
+    if cfg.location_mdn and "location_mdn" in out:
+        lm = out["location_mdn"]
+        loc_tgt = batch["targets"]["location"]  # (B, T, 2) — NaN where masked
+        valid_loc = torch.isfinite(loc_tgt).all(dim=-1)  # (B, T)
+        if valid_loc.any():
+            log_w_v = lm["log_w"][valid_loc]        # (N, K)
+            mu_v = lm["mu"][valid_loc]               # (N, K, 2)
+            ls_v = lm["log_std"][valid_loc]          # (N, K, 2)
+            t_v = loc_tgt[valid_loc].unsqueeze(-2)   # (N, 1, 2)
+            var = (2 * ls_v).exp()
+            comp = -0.5 * (((t_v - mu_v) ** 2) / var + 2 * ls_v + math.log(2 * math.pi)).sum(-1)
+            logp = torch.logsumexp(log_w_v + comp, dim=-1)
+            loc_nll = -logp.mean()
+        else:
+            loc_nll = torch.tensor(0.0, device=type_loss.device)
+    else:
+        loc_nll = torch.tensor(0.0, device=type_loss.device)
 
     total = (
         w["type"] * type_loss
@@ -246,6 +270,7 @@ def compute_losses(
         + w["result"] * result_loss
         + w["ab_outcome"] * ab_loss
         + cfg.zone_spatial_weight * zone_spatial_loss
+        + w.get("location", 1.0) * loc_nll
     )
 
     return total, {
@@ -257,6 +282,7 @@ def compute_losses(
         "spin_axis": float(spin_axis_loss.detach()),
         "result": float(result_loss.detach()),
         "ab_outcome": float(ab_loss.detach()),
+        "location": float(loc_nll.detach()),
         "total": float(total.detach()),
     }
 
@@ -280,7 +306,7 @@ def evaluate(
     model.eval()
     head_losses_sum = {k: 0.0 for k in (
         "type", "zone", "zone_spatial", "velo", "spin_rate", "spin_axis",
-        "result", "ab_outcome", "total",
+        "result", "ab_outcome", "location", "total",
     )}
     n_batches = 0
     type_correct = 0
@@ -401,6 +427,11 @@ def train(
     type_focal_gamma: float = 0.0,     # focal loss on type head (0 = CE)
     type_class_weight_alpha: float = 0.0,  # inverse-freq class weighting (0 = uniform)
     type_conditioned_heads: bool = False,  # ADR 013 — type-condition the execution/result heads
+    location_mdn: bool = False,  # ADR-014 — add the continuous location MDN head
+    autoregressive_exec_heads: bool = False,  # ADR-014 — full AR factor chain
+    ab_outcome_head: bool = True,  # ADR-014 — set False for v8 (drops the AB head)
+    result_loss_weight: float | None = None,  # override head_weights["result"] (v8: 0.3)
+    location_loss_weight: float = 1.0,  # weight for the MDN NLL in the total loss
 ) -> dict:
     """Run a single training pass; return summary dict.
 
@@ -418,6 +449,12 @@ def train(
     cfg.type_focal_gamma = type_focal_gamma
     cfg.type_class_weight_alpha = type_class_weight_alpha
     cfg.type_conditioned_heads = type_conditioned_heads  # ADR 013
+    cfg.location_mdn = location_mdn  # ADR-014
+    cfg.autoregressive_exec_heads = autoregressive_exec_heads  # ADR-014
+    cfg.ab_outcome_head = ab_outcome_head  # ADR-014
+    if result_loss_weight is not None:
+        cfg.head_weights["result"] = result_loss_weight
+    cfg.head_weights["location"] = location_loss_weight
     run_name = run_name or f"{size}-fold{fold_id}-{int(time.time())}"
     run_dir = ckpt_dir / run_name
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -603,11 +640,14 @@ def train(
                     "event": "train_step", "step": step, "epoch": epoch, "lr": lr,
                     **per_head, "steps_per_s": round(steps_per_s, 2),
                 })
+                loc_str = f" loc={per_head['location']:.3f}" if cfg.location_mdn else ""
+                ab_str = f" ab={per_head['ab_outcome']:.3f}" if cfg.ab_outcome_head else ""
                 print(
                     f"step {step:6d} epoch {epoch} "
                     f"loss={per_head['total']:.3f} type={per_head['type']:.3f} "
-                    f"zone={per_head['zone']:.3f} result={per_head['result']:.3f} "
-                    f"lr={lr:.2e} speed={steps_per_s:.1f}/s"
+                    f"zone={per_head['zone']:.3f} result={per_head['result']:.3f}"
+                    f"{loc_str}{ab_str}"
+                    f" lr={lr:.2e} speed={steps_per_s:.1f}/s"
                 )
 
             if val_loader is not None and step > 0 and step % eval_every == 0:
@@ -736,6 +776,16 @@ def main() -> None:
                    help="inverse-freq class weighting on type head (0 = uniform; 0.5 = mild; 1.0 = full balance)")
     p.add_argument("--type-conditioned-heads", action="store_true",
                    help="type-condition the execution/result heads via the type_fusion MLP (ADR 013)")
+    p.add_argument("--location-mdn", action="store_true",
+                   help="add the MDN continuous location head (ADR 014)")
+    p.add_argument("--autoregressive-exec-heads", action="store_true",
+                   help="full autoregressive factor chain: type->zone->velo->spin->loc (ADR 014)")
+    p.add_argument("--no-ab-outcome-head", action="store_true",
+                   help="drop the AB-outcome head (ADR 014, v8)")
+    p.add_argument("--result-loss-weight", type=float, default=None,
+                   help="override head_weights['result'] (v8: 0.3)")
+    p.add_argument("--location-loss-weight", type=float, default=1.0,
+                   help="weight for the MDN location NLL (default 1.0)")
     args = p.parse_args()
 
     train(
@@ -764,6 +814,11 @@ def main() -> None:
         type_focal_gamma=args.type_focal_gamma,
         type_class_weight_alpha=args.type_class_weight_alpha,
         type_conditioned_heads=args.type_conditioned_heads,
+        location_mdn=args.location_mdn,
+        autoregressive_exec_heads=args.autoregressive_exec_heads,
+        ab_outcome_head=not args.no_ab_outcome_head,
+        result_loss_weight=args.result_loss_weight,
+        location_loss_weight=args.location_loss_weight,
     )
 
 
