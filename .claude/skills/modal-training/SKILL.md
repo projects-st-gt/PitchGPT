@@ -12,25 +12,47 @@ image.
 
 ## The one rule you must never forget
 
-**Always use `--detach` when launching training.**
+**Always use `--detach` AND call the function directly (`::train_remote`).**
 
 ```bash
-# CORRECT — survives sleep, terminal close, session end
+# CORRECT — direct function call + detach + nohup. Survives everything.
+nohup modal run --detach modal_app.py::train_remote \
+  --size small --fold-id 0 --epochs 3 --run-name my-run \
+  > /tmp/my-run.log 2>&1 &
+
+# WRONG — goes through the local entrypoint. Even with --detach, the local
+# main() process streams output and the container dies when it's interrupted.
 modal run --detach modal_app.py --size small --fold 0 --epochs 3 --run-name my-run
 
-# WRONG — container dies when the local process dies
-modal run modal_app.py --size small --fold 0 --epochs 3 --run-name my-run
+# ALSO WRONG — no --detach at all. Container dies on Mac sleep / terminal close.
+modal run modal_app.py::train_remote --size small --fold-id 0 --epochs 3
 ```
 
-`modal run` maintains a live connection. If the user's Mac sleeps, the
-terminal closes, or the Claude session ends, the container is killed and no
-checkpoint is saved. `--detach` disconnects the local process from the
-container — the container runs independently and writes its checkpoint to the
-Volume when done.
+There are TWO things that must both be right:
 
-This burned us on 2026-06-05: a 10-hour training job died at step 700/14100
-because the local `modal run` process was interrupted overnight. No checkpoint
-was saved; the entire run was wasted.
+1. **`::train_remote`** (direct function call, not the local entrypoint).
+   `modal run modal_app.py` goes through `@app.local_entrypoint()` which
+   runs `main()` **locally** on your Mac. `main()` calls
+   `train_remote.remote()` and blocks waiting for the result. Even with
+   `--detach`, the local `main()` is the one streaming output — when that
+   process dies (sleep, terminal close, Claude bash cleanup), the connection
+   breaks and the container dies too. `modal run modal_app.py::train_remote`
+   calls the remote function **directly** — no local entrypoint, no local
+   blocking, `--detach` works properly.
+
+2. **`--detach`** tells Modal to keep the remote container alive even if the
+   local `modal` CLI process exits. Without it, the container dies when the
+   CLI disconnects.
+
+Adding `nohup ... &` is a belt-and-suspenders measure: it prevents the local
+`modal` process from being killed by terminal close or shell cleanup.
+
+This burned us on 2026-06-05/06: three attempts to launch a 10-hour training
+job failed. Run 1 (`modal run` without `--detach`) died at step 700/14100.
+Run 2 (`modal run --detach modal_app.py`, through the local entrypoint) died
+at step 50. Run 3 (`modal run --detach modal_app.py::train_remote` with
+`nohup`) survived. No checkpoint was saved in runs 1 or 2 — the entire
+compute was wasted each time.
 
 ## Architecture
 
@@ -69,8 +91,8 @@ python scripts/upload_to_modal.py        # upload ~1.3 GB of data (once, idempot
 ### 2. Smoke test (verify code + data before committing to hours of GPU time)
 
 ```bash
-modal run --detach modal_app.py --size sanity --max-steps 50 \
-  --max-pitches 200000 --run-name smoke-test
+modal run --detach modal_app.py::train_remote \
+  --size sanity --max-steps 50 --max-pitches 200000 --run-name smoke-test
 ```
 
 Check that all loss terms are finite, shapes are correct, and the log shows
@@ -85,23 +107,26 @@ tail -5 /tmp/smoke.jsonl | python3 -m json.tool
 
 ```bash
 # v8 example (full flags):
-modal run --detach modal_app.py \
-  --size small --fold 0 --epochs 3 \
+nohup modal run --detach modal_app.py::train_remote \
+  --size small --fold-id 0 --epochs 3 \
   --type-conditioned-heads \
   --location-mdn --autoregressive-exec-heads --no-ab-outcome-head \
   --result-loss-weight 0.3 \
   --type-focal-gamma 2.0 --type-class-weight-alpha 0.5 \
-  --run-name small-fold0-v8
+  --run-name small-fold0-v8 \
+  > /tmp/small-fold0-v8.log 2>&1 &
 
 # v7 example (simpler):
-modal run --detach modal_app.py \
-  --size small --fold 0 --epochs 3 \
+nohup modal run --detach modal_app.py::train_remote \
+  --size small --fold-id 0 --epochs 3 \
   --type-conditioned-heads \
-  --run-name small-fold0-v7
+  --run-name small-fold0-v7 \
+  > /tmp/small-fold0-v7.log 2>&1 &
 ```
 
-Note the app ID printed at launch (e.g., `ap-FMtyau3UZ5eYKOgtntagK2`). You
-can view it at `https://modal.com/apps/siddhartha-thakur/main/<app-id>`.
+Note: `::train_remote` uses `--fold-id` (the function parameter name), not
+`--fold` (the local entrypoint alias). Check the app ID in the log or with
+`modal app list`. View it at `https://modal.com/apps/siddhartha-thakur/main/<app-id>`.
 
 ### 4. Monitor training
 
@@ -204,9 +229,11 @@ critical — but still recommended for anything over ~5 minutes.
 
 ## Gotchas and hard-won lessons
 
-### The `--detach` rule (again, because it matters)
-Without `--detach`, the training container dies when the local process dies.
-Macs sleep. Terminals close. Sessions end. Always `--detach`.
+### Direct function call + `--detach` (the #1 rule)
+`modal run modal_app.py` = local entrypoint, fragile even with `--detach`.
+`modal run modal_app.py::train_remote` = direct remote call, survives
+disconnection with `--detach`. Always use the `::function_name` form for
+long-running jobs. See the top of this skill for the full explanation.
 
 ### Code vs data
 Code is baked into the image (`add_local_python_source`). Data is on the
