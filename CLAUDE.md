@@ -148,6 +148,8 @@ Skills load on demand. Trigger by topic, not just by keyword:
                           held-out-pitcher cohort, bootstrapped CIs
 - `frontend-system`    — design tokens, components, motion, trust-gauge UI,
                           refusal UX
+- `modal-training`     — Modal GPU training, --detach rule, volume/image
+                          architecture, monitoring, checkpoint pull, fan-out
 
 When working in any of these areas, read the skill before writing code. If a
 convention in CLAUDE.md and a skill conflict, the skill is more specific —
