@@ -1,6 +1,6 @@
 # ContextSwitcher — Pick up where this session left off
 
-**Last updated**: 2026-06-05 — small-v8 EXECUTION underway: Tasks 1–9 done; T7 (training) running on Modal; resume at T8 (calibrate) after checkpoint lands.
+**Last updated**: 2026-06-07 — small-v8 COMPLETE, gate FAILED. Root cause updated: MDN location works but model-generated pitch sequences are more hittable than real ones. Next: diagnose the rollout's type/zone distribution vs reality.
 
 ## 🧵 THE THREAD — why we're building small-v8 (read this first)
 
@@ -42,34 +42,156 @@ spec; the small-v8 spec + ADR-014 + plan; and small-v8 Tasks 1–3.
 
 ---
 
-## 🟡 small-v8 EXECUTION IN PROGRESS (2026-06-05)
+## 🔴 small-v8 COMPLETE — GATE FAILED, ROOT CAUSE UPDATED (2026-06-07)
 
-**Plan:** `docs/superpowers/plans/2026-06-05-small-v8.md` (10 tasks, subagent-driven,
-TDD, ends at the backtest GATE). **Spec:** `docs/superpowers/specs/2026-06-05-small-v8-design.md`.
-**ADR:** `docs/decisions/014-...md`. Branch `hitter-swing-model` (NOT main; no worktree).
+**Plan:** `docs/superpowers/plans/2026-06-05-small-v8.md`. **Spec:**
+`docs/superpowers/specs/2026-06-05-small-v8-design.md`. **ADR:**
+`docs/decisions/014-...md`. Branch `hitter-swing-model`.
 
-**DONE (committed):**
-- T1 ADR-014 (`5612066`). T2 config flags (`6e1e80c`). T3 LocationMDN head +
-  tests (`4cd0b56`), device-safe nll fix (`ef1455e`).
-- T4 forward wiring (`e0b3c2c`): AR exec-head conditioning + LocationMDN in forward +
-  AB head optional. v7 back-compat verified (all flags default off).
-- T5 dataset (`039aa26`): `targets["location"]` = left-shifted (plate_x,plate_z) with NaN pad.
-  Named: `location target[0] = (0.083, 3.823)`.
-- T6 training loss (`aaddd91`): MDN NLL + AB loss gated + result weight 0.3 + v8 CLI flags.
-  Named: `loc=5.124` at step 0, `ab_outcome=0.0` (disabled). 50-step smoke passed.
-- T7 modal_app (`45f6c88`): v8 flags forwarded in train_remote + main entrypoint.
-  **TRAINING RUNNING** on Modal (`ap-whcJtDg2dd15EqCyUjxjx4`), L4 GPU, ~1.1 steps/s.
-  At step 600: type=0.691, zone=2.326, loc=1.107 (loss dropping steadily).
-- T9 sim glue (`9623cd8`): `sample_location_mdn_for_rollout()` on PitchGPT runs the
-  AR fusion chain on captured trunk hidden + just-sampled factor IDs (no re-forward).
-  `build_step_features` accepts real (plate_x, plate_z) when provided.
+**ALL TASKS DONE (T1–T10).** Training completed on Modal (3 epochs, 14,109
+steps). Calibrated. Backtested. **Gate FAILED.** The MDN location head works
+but the walk deficit persists — and the root cause has been updated.
 
-**WAITING FOR T7 (~10h training), THEN:** T8 calibrate (pull checkpoint, temperature-scale
-+ MDN distributional check) → **T10 GATE: backtest must beat lookup 1.4435 / baseline
-1.4631** (`scripts/hitter/run_backtest_modal.py`, n=800, n-paths=300).
+### small-v8 backtest result
 
-**Root cause being fixed:** simulator fed the cascade each pitch's ZONE CENTROID (borderline)
-not a real spot → over-swing → too few balls → walks 5.2% vs 9.3%. See the 🟢 section below.
+| pitch source | log-loss | BB pred | BB real |
+|---|---|---|---|
+| lookup + cascade | **1.4435** | 8.0% | 9.3% |
+| baseline | 1.4631 | 8.5% | 9.3% |
+| **pitchGPT v8 + cascade** | **1.4762** | **6.4%** | **9.3%** |
+| pitchGPT v7 + cascade | 1.4846 | 5.2% | 9.3% |
+
+v8 IS better than v7 (1.4762 vs 1.4846), but both fail the gate (must beat
+lookup 1.4435). Walks improved from 5.2% to 6.4% but are still ~31% short.
+
+### v8 calibration
+
+| head | ECE | top-1 | temperature |
+|---|---|---|---|
+| type | 0.017 | 0.438 | 1.01 |
+| zone | 0.005 | 0.293 | 1.01 |
+| velo | 0.010 | 0.417 | 1.19 |
+| spin_rate | 0.009 | 0.553 | 1.03 |
+| result | 0.002 | 0.547 | 0.99 |
+
+MDN distributional check: sampled |plate_x|>1.1 = 0.191 (real 0.190) — perfect.
+
+### Diagnosis probes run (2026-06-06/07) — what we tested and learned
+
+**Probe 1 — MDN teacher-forced distributional check (T8):**
+Sampled (plate_x) from v8's MDN on val data (326K pitches, teacher-forced).
+Result: |plate_x|>1.1 = 19.1% sampled vs 19.0% real, KS stat=0.011.
+**Conclusion: MDN reproduces real location distribution perfectly when given
+real pitch sequences.**
+
+**Probe 2 — v8 backtest, first run (T10):**
+n=800 PAs, n_paths=300, Modal. Result: BB=6.4% (v7 was 5.2%, real 9.3%).
+Log-loss 1.4762 — better than v7's 1.4846 but fails gate.
+**Conclusion: MDN helps (~23% of walk gap closed) but doesn't fix the problem.**
+
+**Probe 3 — `in_zone` feature mismatch investigation:**
+Discovered that the cascade trains `in_zone` from coordinates (`|plate_x| <=
+0.83 & 1.5 <= plate_z <= 3.5`) but the rollout computes it from zone_id
+(`zone_id < 9`). Measured disagreement: 3.5% of pitches (73 false-in, 83
+false-out — roughly symmetric).
+**Conclusion: a real bug, but small and symmetric — unlikely to be the
+dominant cause.**
+
+**Probe 4 — `in_zone` fix backtest:**
+Applied the coordinate-based `in_zone` fix and re-ran the backtest.
+Result: BB=6.2% (WORSE than 6.4%), log-loss=1.5003 (WORSE than 1.4762).
+Reverted the fix (`27c5366`).
+**Conclusion: the cascade was calibrated to the zone_id-based in_zone
+definition. Changing it without retraining the cascade broke calibration.
+The `in_zone` mismatch is NOT the cause of the walk deficit.**
+
+**Probe 5 — zone coverage analysis (user hypothesis):**
+Checked whether pitchGPT's 13 zones can represent "wildly outside" pitches.
+Zones 9-12 (out-of-zone) lump everything together: zone 12 contains pitches
+from plate_x=0.12 (barely outside) to plate_x=3.30 (three feet wide). 12%
+of all pitches land in "no sane batter swings" territory (|x|>1.5 or z
+outside [0.5, 4.5]) — real swing rate on these is 6.7% vs 38% on borderline.
+**Conclusion: the zones ARE coarse, but the MDN was designed to fix this by
+learning the within-zone spread — and it does (Probe 1). The problem is
+elsewhere.**
+
+**Probe 6 — CASCADE ISOLATION DIAGNOSTIC (the breakthrough, 2026-06-07):**
+Fed the cascade 10K real held-out pitches with three different location
+sources, keeping all other features (type, zone, count, profiles) REAL:
+
+| location source | ball rate | swing rate |
+|---|---|---|
+| ALL REAL | 0.354 | 0.485 |
+| CENTROID (v7 bug) | 0.303 | 0.537 |
+| **MDN teacher-forced** | **0.372** | **0.451** |
+
+The MDN OVER-CORRECTS — ball rate 0.372 > real 0.354. It fixes **137%** of
+the centroid gap. The MDN locations make batters take TOO MUCH, not too little.
+
+**THIS CHANGES THE ROOT CAUSE.** If MDN locations produce MORE balls than
+real data, but the rollout produces FEWER walks, the walk deficit is NOT from
+the location. It's from the PITCH SEQUENCE that pitchGPT generates — the
+type/zone choices the model makes during the rollout produce pitches that
+are more swingable on average than real pitches, and this overwhelms the
+MDN's over-correction. The MDN is masking the problem, not causing it.
+
+### Updated root cause (2026-06-07)
+
+**ORIGINAL hypothesis (2026-06-05):** zone centroid → borderline location →
+over-swing → too few balls → too few walks. **Fix = MDN location head.**
+
+**UPDATED (2026-06-07):** The centroid WAS a problem, and the MDN DOES fix
+it (over-fixes it, actually). But there is a SECOND, LARGER problem: **the
+pitch sequences pitchGPT generates during rollout produce pitches that are
+more hittable than real pitches** — the cascade swings more on model-
+generated sequences than on real sequences, even when the locations are
+correct. The MDN partially masks this by over-correcting the location, but
+the net effect is still too few walks.
+
+**Not yet investigated:** What makes the model-generated sequences more
+hittable? Candidates:
+- Type distribution: does the model predict too many fastballs / too few
+  breaking balls in the rollout?
+- Zone distribution: does the model put too many pitches in the strike zone?
+- Sequence patterns: does the model fail to reproduce pitch-sequencing
+  patterns (e.g., wasting pitches, working counts) that lead to walks?
+- Exposure bias: the model was trained on real sequences but generates its
+  own — small per-pitch errors compound over a 5-pitch AB.
+
+**Next step:** Compare pitchGPT's rollout type/zone marginals to real data.
+If the rollout puts more pitches in-zone than reality, that's the fix target.
+If the marginals match but the walk rate is still low, the problem is in the
+sequence conditioning (exposure bias) and harder to fix.
+
+### Modal training lessons (2026-06-06)
+
+Three failed attempts to launch a 10h training job:
+- Run 1: `modal run` without `--detach` → died at step 700 (Mac sleep)
+- Run 2: `modal run --detach modal_app.py` (local entrypoint) → died at step
+  50 (local `main()` still blocked; killed on terminal cleanup)
+- Run 3: `modal run --detach modal_app.py::train_remote` (direct function
+  call) + `nohup` → SURVIVED, completed 14,109 steps.
+
+**Rule:** always use `nohup modal run --detach modal_app.py::train_remote`
+for long jobs. Documented in `.claude/skills/modal-training/SKILL.md`.
+
+### Commits this session (hitter-swing-model)
+
+| commit | description |
+|---|---|
+| `e0b3c2c` | T4: AR exec-head conditioning + LocationMDN wiring |
+| `039aa26` | T5: dataset emits (plate_x,plate_z) MDN target |
+| `aaddd91` | T6: MDN loss + result reweight + v8 CLI flags |
+| `45f6c88` | T7: modal_app v8 flags |
+| `9623cd8` | T9: MDN sampling in rollout + native velo/spin glue |
+| `e3d357f` | docs: ContextSwitcher T4-T9 done |
+| `dd88347` | T8: calibration + MDN distributional check |
+| `576cb7d` | modal-training skill |
+| `bc8106c` | modal-training skill update (::train_remote lesson) |
+| `e73da79` | fix: MDN sample device/dtype for MPS compat |
+| `226def2` | fix: nuisance.device typo in MDN rollout |
+| `ecbd037` | fix: in_zone from coords (later reverted) |
+| `27c5366` | revert: in_zone fix (made things worse) |
 
 ## 🟢 ROOT CAUSE FOUND: the zone-CENTROID location glue (2026-06-05)
 
