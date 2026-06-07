@@ -601,7 +601,7 @@ def g_compute(
         # --- Sample location from MDN (v8) if available -------------------------
         step_kwargs = {}  # extra kwargs for hitter_step_fn (plate_x, plate_z, etc.)
         if outcome_model == "hitter" and getattr(nuisance.model.config, "location_mdn", False):
-            device = nuisance._device
+            device = nuisance.device
             h_full = out.pitch_hidden  # (N, T_total, d) — post-ln_final, on CPU
             h_at_pred = h_full[:, seq_idx_for_predicting_step, :].to(device)
             type_t = full["type"][:, step].to(device)
