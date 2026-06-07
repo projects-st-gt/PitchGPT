@@ -230,5 +230,5 @@ class LocationMDN(nn.Module):
         idx = torch.multinomial(flat_w, 1, generator=generator).reshape(*w.shape[:-1])
         mu_s = torch.gather(mu, -2, idx[..., None, None].expand(*idx.shape, 1, 2)).squeeze(-2)
         ls_s = torch.gather(log_std, -2, idx[..., None, None].expand(*idx.shape, 1, 2)).squeeze(-2)
-        eps = torch.randn(mu_s.shape, generator=generator)
+        eps = torch.randn(mu_s.shape, generator=generator, device=mu_s.device, dtype=mu_s.dtype)
         return mu_s + eps * ls_s.exp()
