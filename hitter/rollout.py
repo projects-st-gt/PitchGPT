@@ -117,7 +117,10 @@ def build_step_features(
         spin = np.asarray(spin_native, float)
     else:
         spin = np.array([spin_by_type.get(int(t), _LEAGUE_SPIN) for t in tid], float)
-    in_zone = np.isin(zid, list(_IN_ZONE_IDS)).astype("int8")
+    if plate_x is not None and plate_z is not None:
+        in_zone = ((np.abs(cx) <= 0.83) & (cz >= 1.5) & (cz <= 3.5)).astype("int8")
+    else:
+        in_zone = np.isin(zid, list(_IN_ZONE_IDS)).astype("int8")
     prev_in_zone = np.where(
         prev_zone_ids < 0, -1,
         np.isin(np.asarray(prev_zone_ids, int), list(_IN_ZONE_IDS)).astype(int),
