@@ -253,3 +253,90 @@ class TestV2TransformerBlock:
         assert max_diff > 1e-4, (
             f"Block output is suspiciously close to input (max_diff={max_diff:.2e})"
         )
+
+
+# ---------------------------------------------------------------------------
+# PitchGPTV2 — full model
+# ---------------------------------------------------------------------------
+
+from model.v2.model import PitchGPTV2
+
+
+class TestPitchGPTV2:
+    def _make_inputs(self, cfg: V2Config, B: int = 2, T: int = 5):
+        """Return all forward() keyword arguments for the given batch dims."""
+        torch.manual_seed(0)
+        return dict(
+            pitcher_profile=torch.randn(B, cfg.pitcher_profile_dim),
+            batter_profile=torch.randn(B, cfg.batter_profile_dim),
+            type_ids=torch.randint(0, cfg.n_pitch_types, (B, T)),
+            continuous=torch.randn(B, T, cfg.n_continuous),
+            result_ids=torch.randint(0, cfg.n_result_classes, (B, T)),
+            count_state=torch.randint(0, cfg.n_count_states, (B, T)),
+            outs=torch.randint(0, cfg.n_outs, (B, T)),
+            runners=torch.randint(0, cfg.n_runner_states, (B, T)),
+            pitch_number=torch.arange(T).unsqueeze(0).expand(B, -1),
+            padding_mask=torch.ones(B, T, dtype=torch.bool),
+        )
+
+    def test_forward_shapes(self) -> None:
+        cfg = tiny_v2_config()
+        model = PitchGPTV2(cfg)
+        B, T = 2, 5
+        out = model(**self._make_inputs(cfg, B, T))
+
+        print(
+            f"\nPitchGPTV2 forward shapes — "
+            f"type_logits={tuple(out['type_logits'].shape)}, "
+            f"hidden={tuple(out['hidden'].shape)}"
+        )
+        print(
+            f"  type_logits[0,0,1]={out['type_logits'][0, 0, 1].item():.4f} (FF logit, pos 0)"
+        )
+
+        assert out["type_logits"].shape == (B, T, cfg.n_pitch_types), (
+            f"type_logits: expected ({B},{T},{cfg.n_pitch_types}), "
+            f"got {tuple(out['type_logits'].shape)}"
+        )
+        assert out["hidden"].shape == (B, T, cfg.d_model), (
+            f"hidden: expected ({B},{T},{cfg.d_model}), "
+            f"got {tuple(out['hidden'].shape)}"
+        )
+
+    def test_gmm_after_type(self) -> None:
+        cfg = tiny_v2_config()
+        model = PitchGPTV2(cfg)
+        B, T = 2, 5
+        out = model(**self._make_inputs(cfg, B, T))
+
+        sampled_type = torch.randint(1, cfg.n_pitch_types, (B, T))
+        log_w, mu, log_std = model.predict_continuous(out["hidden"], sampled_type)
+
+        print(
+            f"\npredict_continuous shapes — "
+            f"log_w={tuple(log_w.shape)}, "
+            f"mu={tuple(mu.shape)}, "
+            f"log_std={tuple(log_std.shape)}"
+        )
+        print(
+            f"  mu[0,0,0,0]={mu[0, 0, 0, 0].item():.4f} "
+            f"(component 0, velo mean, seq pos 0)"
+        )
+
+        assert mu.shape == (B, T, cfg.gmm_components, cfg.n_continuous), (
+            f"mu: expected ({B},{T},{cfg.gmm_components},{cfg.n_continuous}), "
+            f"got {tuple(mu.shape)}"
+        )
+        assert log_w.shape == (B, T, cfg.gmm_components), (
+            f"log_w: expected ({B},{T},{cfg.gmm_components}), "
+            f"got {tuple(log_w.shape)}"
+        )
+
+    def test_param_count(self) -> None:
+        cfg = tiny_v2_config()
+        model = PitchGPTV2(cfg)
+        n = model.num_parameters()
+        print(f"\ntiny-v2 params: {n:,}")
+        assert 1_000_000 < n < 50_000_000, (
+            f"Unexpected parameter count: {n:,} — expected between 1M and 50M"
+        )
