@@ -183,3 +183,73 @@ def test_adaln_identity_at_zero_init(tiny_cfg: V2Config) -> None:
         f"With gamma=1, beta=0, AdaLayerNorm should match plain LayerNorm. "
         f"Max deviation: {(ada_out - plain_out).abs().max().item():.2e}"
     )
+
+
+# ---------------------------------------------------------------------------
+# V2TransformerBlock
+# ---------------------------------------------------------------------------
+
+from model.v2.transformer import V2TransformerBlock, build_causal_mask
+
+
+class TestV2TransformerBlock:
+    def test_forward_shape(self) -> None:
+        cfg = tiny_v2_config()
+        block = V2TransformerBlock(cfg)
+        B, T = 2, 5
+        x = torch.randn(B, T, cfg.d_model)
+        mask = build_causal_mask(T, x.device)
+        g1 = torch.ones(B, cfg.d_model)
+        b1 = torch.zeros(B, cfg.d_model)
+        g2 = torch.ones(B, cfg.d_model)
+        b2 = torch.zeros(B, cfg.d_model)
+
+        with torch.no_grad():
+            out = block(x, mask, g1, b1, g2, b2)
+
+        print(
+            f"\nV2TransformerBlock forward — "
+            f"out.shape={tuple(out.shape)}, "
+            f"out[0,0,0]={out[0, 0, 0].item():.4f}"
+        )
+
+        assert out.shape == (B, T, cfg.d_model), (
+            f"Expected ({B}, {T}, {cfg.d_model}), got {tuple(out.shape)}"
+        )
+
+    def test_causal_mask(self) -> None:
+        T = 4
+        mask = build_causal_mask(T, torch.device("cpu"))
+
+        print(
+            f"\nbuild_causal_mask(4) — "
+            f"mask[0,0,0,1]={mask[0, 0, 0, 1].item()} (expect False), "
+            f"mask[0,0,2,1]={mask[0, 0, 2, 1].item()} (expect True)"
+        )
+
+        assert mask.shape == (1, 1, T, T), (
+            f"Expected (1, 1, {T}, {T}), got {tuple(mask.shape)}"
+        )
+        assert mask[0, 0, 0, 1] == False, "Position 0 must not attend to position 1 (future)"
+        assert mask[0, 0, 2, 1] == True,  "Position 2 must attend to position 1 (past)"
+
+    def test_output_not_identical_to_input(self) -> None:
+        """Block should transform its input, not pass it through unchanged."""
+        cfg = tiny_v2_config()
+        block = V2TransformerBlock(cfg)
+        B, T = 2, 6
+        x = torch.randn(B, T, cfg.d_model)
+        mask = build_causal_mask(T, x.device)
+        g1 = torch.ones(B, cfg.d_model)
+        b1 = torch.zeros(B, cfg.d_model)
+        g2 = torch.ones(B, cfg.d_model)
+        b2 = torch.zeros(B, cfg.d_model)
+
+        with torch.no_grad():
+            out = block(x, mask, g1, b1, g2, b2)
+
+        max_diff = (out - x).abs().max().item()
+        print(f"\nBlock output vs input — max_diff={max_diff:.4f}")
+        assert max_diff > 1e-4, (
+            f"Block output is suspiciously close to input (max_diff={max_diff:.2e})"
+        )
