@@ -41,7 +41,12 @@ import numpy as np
 import pandas as pd
 import torch
 
-from causal.nuisance_v2 import NuisanceModelsV2, build_single_ab_batch_v2
+from causal.nuisance_v2 import (
+    NuisanceModelsV2,
+    build_single_ab_batch_v2,
+    denormalize_continuous,
+    normalize_continuous,
+)
 from causal.g_computation import (
     # Count-state machine
     count_state_id,
@@ -307,8 +312,12 @@ def g_compute_v2(
     # Before the first rollout step, if k > 0, the previous pitch is observed.
     if k > 0 and k <= T_obs:
         prev_type = batch["type_ids"][:, k].numpy().copy()  # seq pos k = pitch k-1
-        # Compute previous zone from observed continuous values.
-        prev_cont = batch["continuous"][:, k].numpy()  # (N, 4)
+        # Compute previous zone from observed continuous values. The batch
+        # stores them z-score normalized (model input space) — map back to
+        # raw feet before the zone grid.
+        prev_cont = denormalize_continuous(
+            batch["continuous"][:, k].numpy(), nuisance.cfg
+        )  # (N, 4) raw
         prev_zone = plate_to_zone(prev_cont[:, 2], prev_cont[:, 3])
     else:
         prev_type = np.zeros(N, dtype=np.int64)
@@ -407,12 +416,15 @@ def g_compute_v2(
             log_w.to(nuisance.device),
             mu.to(nuisance.device),
             log_std.to(nuisance.device),
-        ).cpu()  # (N, 1, 4)
+        ).cpu()  # (N, 1, 4) — in z-score space (the GMM was trained on
+                 # normalized targets)
 
-        velo = cont_sample[:, 0, 0].numpy()       # mph
-        spin = cont_sample[:, 0, 1].numpy()       # rpm
-        plate_x = cont_sample[:, 0, 2].numpy()    # feet
-        plate_z = cont_sample[:, 0, 3].numpy()    # feet
+        # Denormalize to raw units for clipping + the cascade.
+        cont_raw = denormalize_continuous(cont_sample[:, 0, :].numpy(), nuisance.cfg)
+        velo = cont_raw[:, 0].astype(np.float64)     # mph
+        spin = cont_raw[:, 1].astype(np.float64)     # rpm
+        plate_x = cont_raw[:, 2].astype(np.float64)  # feet
+        plate_z = cont_raw[:, 3].astype(np.float64)  # feet
 
         # Clamp to reasonable physical bounds.
         velo = np.clip(velo, 60.0, 110.0)
@@ -420,11 +432,12 @@ def g_compute_v2(
         plate_x = np.clip(plate_x, -2.5, 2.5)
         plate_z = np.clip(plate_z, 0.0, 5.0)
 
-        # Write continuous values into the sequence.
-        continuous[:, seq_pos, 0] = torch.from_numpy(velo.astype(np.float32))
-        continuous[:, seq_pos, 1] = torch.from_numpy(spin.astype(np.float32))
-        continuous[:, seq_pos, 2] = torch.from_numpy(plate_x.astype(np.float32))
-        continuous[:, seq_pos, 3] = torch.from_numpy(plate_z.astype(np.float32))
+        # Write the clipped values back into the sequence in NORMALIZED space
+        # — the model's next forward pass expects its training input scale.
+        cont_clipped_raw = np.stack([velo, spin, plate_x, plate_z], axis=1)
+        continuous[:, seq_pos] = torch.from_numpy(
+            normalize_continuous(cont_clipped_raw, nuisance.cfg)
+        )
 
         # Capture mean velo at the intervention step.
         if step == k:

@@ -32,6 +32,26 @@ from model.v2.model import PitchGPTV2
 from model.pitchgpt_dataset import ProfileStandardizer
 
 
+def normalize_continuous(raw: np.ndarray, cfg: V2Config) -> np.ndarray:
+    """Z-score normalize raw continuous values [velo, spin, plate_x, plate_z].
+
+    The model was trained on normalized inputs (scripts.train_v2 normalizes
+    after the dataset's nan->0 fill), so every rollout input must go through
+    this before forward().
+    """
+    mean = np.asarray(cfg.continuous_means, dtype=np.float32)
+    std = np.asarray(cfg.continuous_stds, dtype=np.float32)
+    return (np.asarray(raw, dtype=np.float32) - mean) / std
+
+
+def denormalize_continuous(normed: np.ndarray, cfg: V2Config) -> np.ndarray:
+    """Invert :func:`normalize_continuous` — GMM samples live in z-score space
+    and must be mapped back to raw mph/rpm/feet before the cascade sees them."""
+    mean = np.asarray(cfg.continuous_means, dtype=np.float32)
+    std = np.asarray(cfg.continuous_stds, dtype=np.float32)
+    return np.asarray(normed, dtype=np.float32) * std + mean
+
+
 class NuisanceModelsV2:
     """Wraps a trained PitchGPTV2 checkpoint for rollout use.
 
@@ -48,6 +68,7 @@ class NuisanceModelsV2:
         device: str | torch.device | None = None,
         profiles_dir: Path = Path("data/profiles"),
         standardize_profiles: bool = True,
+        apply_temperatures: bool = True,
     ):
         ckpt_path = Path(ckpt_path)
         if not ckpt_path.exists():
@@ -78,8 +99,16 @@ class NuisanceModelsV2:
         self.step = ckpt.get("step", None)
         self.schema_version = ckpt.get("schema_version", 2)
 
-        # Temperatures (optional — V2 checkpoints may not have them yet).
+        # Temperatures from scripts.calibrate_v2. Same convention as V1
+        # NuisanceModels: refuse an uncalibrated checkpoint unless the caller
+        # opts out explicitly.
         self.temperatures: dict[str, float] = ckpt.get("temperatures", {})
+        if apply_temperatures and not self.temperatures:
+            raise RuntimeError(
+                f"{ckpt_path} has no 'temperatures' — run `scripts.calibrate_v2` "
+                f"on the raw checkpoint first; pass apply_temperatures=False to skip."
+            )
+        self.apply_temperatures = bool(apply_temperatures)
 
         # Lazy profile cache loaders (same pattern as v1).
         self.profiles_dir = Path(profiles_dir)
@@ -139,7 +168,9 @@ class NuisanceModelsV2:
 
         Returns:
             {"type_logits": (B, T, 8), "hidden": (B, T, d_model)}
-            Both tensors are on CPU as float32.
+            Both tensors are on CPU as float32. type_logits are
+            temperature-scaled (logits / T_type) when the checkpoint is
+            calibrated and apply_temperatures is True.
         """
         bd = self._to_device(batch)
         out = self.model(
@@ -154,8 +185,13 @@ class NuisanceModelsV2:
             pitch_number=bd["pitch_number"],
             padding_mask=bd["padding_mask"],
         )
+        type_logits = out["type_logits"].detach().cpu().float()
+        if self.apply_temperatures:
+            T = self.temperatures.get("type")
+            if T:
+                type_logits = type_logits / float(T)
         return {
-            "type_logits": out["type_logits"].detach().cpu().float(),
+            "type_logits": type_logits,
             "hidden": out["hidden"].detach().cpu().float(),
         }
 
@@ -283,9 +319,10 @@ def build_single_ab_batch_v2(
     runners_raw = ab_df["runners_state"].to_numpy(dtype=np.int64)  # 0..7
     pitch_num_raw = ab_df["pitch_number"].to_numpy(dtype=np.int64) # 1..T
 
-    # Continuous: [velo, spin, plate_x, plate_z]
+    # Continuous: [velo, spin, plate_x, plate_z]. reindex() yields NaN columns
+    # when a synthetic AB (mcsim.state.build_synthetic_ab) lacks velo/spin.
     cont_cols = ["release_speed", "release_spin_rate", "plate_x", "plate_z"]
-    cont_raw = ab_df[cont_cols].to_numpy(dtype=np.float32)
+    cont_raw = ab_df.reindex(columns=cont_cols).to_numpy(dtype=np.float32)
     cont_raw = np.nan_to_num(cont_raw, nan=0.0)
 
     # ---- Build sequences with start token prepended ----
@@ -294,6 +331,11 @@ def build_single_ab_batch_v2(
 
     continuous = np.zeros((seq_len, 4), dtype=np.float32)
     continuous[1:] = cont_raw
+    # Z-score normalize the FULL sequence, start token included. Training
+    # normalizes after the dataset's nan->0 fill, so the start token's raw
+    # zeros became (0-mean)/std — mirror that exactly or the model sees an
+    # input distribution it never trained on.
+    continuous = normalize_continuous(continuous, nuisance.cfg)
 
     result_ids = np.zeros(seq_len, dtype=np.int64)
     result_ids[1:] = result_ids_raw
