@@ -1,10 +1,66 @@
 # ContextSwitcher — Pick up where this session left off
 
-**Last updated**: 2026-06-09 (evening) — base-v1c CALIBRATED (T=0.949), rollout
-NORMALIZATION BUG fixed, backtest wiring built. **800×300 BACKTEST RUNNING NOW**
-(`/tmp/backtest_v2.log`, background, driver `run_backtest_v2_modal`).
+**Last updated**: 2026-06-09 (late) — V2 BACKTEST RAN: **WALKS FIXED (BB 8.7%
+vs 9.25% real — v7 5.2, v8/v9 6.4) but log-loss GATE FAILED** (1.4801–1.4858
+vs lookup 1.4435). Diagnosis underway — gap decomposed; two confirmatory runs
+in flight (1500-path MC-noise test, 60-PA rollout marginals).
 
-## 🟡🟡🟡 IN FLIGHT: V2 backtest 800 PAs × 300 paths (2026-06-09 evening)
+## 🔶🔶🔶 V2 BACKTEST RESULT + DIAGNOSIS (2026-06-09 late)
+
+**Result (800 PAs seed 0, n_paths 300):** BB GATE **PASS** (8.7% vs real
+9.25%); log-loss **FAIL** (V2 1.4858 first run / 1.4801 rerun — ±0.005 MC
+jitter, now fixed by seeding torch per Modal task — vs same-sample lookup
+1.4435, baseline 1.4631). Aggregates: V2 is the MOST calibrated of the three
+sources (K −0.9pp, BB −0.5, 1B −0.7, HR +0.3, out −0.6); only 2B +2.3pp, and
+the sample itself is doubles-light (real 3.0% vs league ~4.6%; even baseline
+is +1.6pp there).
+
+**Gap decomposition** (`scripts/hitter/diagnose_backtest_dists.py` on
+`data/backtests/v2_n800_p300_seed0.json` — per-PA dists now saved by the
+driver):
+1. **Floor artifact ~0.017**: one 3B got 0/300 paths → −log(1e-9) costs 0.026
+   alone. Laplace-smoothed (add-one over paths, all sources): V2 1.4801→1.4634,
+   lookup 1.4435→1.4443. MC sources structurally pay this; analytic lookup
+   can't.
+2. **Remaining ~0.019 concentrates on out (+0.019) and K (+0.009)** vs lookup;
+   V2 BEATS lookup per-PA on HR (−0.011), BB, 2B. V2 dists: higher entropy
+   (1.472 vs 1.428), more cross-matchup spread (std P(out) 0.061 vs 0.050),
+   LOWER mean p(actual) (0.295 vs 0.305) → per-matchup variation ≈ noise+
+   over-spread, smoothed V2 ≈ baseline.
+3. **Mechanism for the out-deficit CONFIRMED (8-PA smoke, full run in
+   flight)**: xwOBA-map bin occupancy skewed high — in-play-weighted high-third
+   = 0.438 vs uniform 0.333 design (map = quantiles of predicted xwOBA on
+   REAL 2023 pitches). High bins → 2B/HR mass up, out mass down → losses on
+   the 46%-frequent out class. Open question: is V2's pitch mix genuinely more
+   hittable (sequence issue) or is it a cascade feature-distribution mismatch
+   (needs Probe-6-style isolation: cascade cq on real vs V2-sampled pitches at
+   matched counts)? NOTE the marginals diagnostic used stand=R/throws=R for
+   all PAs (saved JSON lacks handedness — add to --save-dists next run).
+4. Rollout pitch behavior otherwise CLOSE to real (8-PA smoke): in-zone 0.472
+   vs 0.491, ball rate 0.366 vs 0.355 (slightly ball-heavy — consistent with
+   walks now right).
+
+**In flight (check /tmp logs):** (a) `/tmp/backtest_v2_p1500.log` — 800 PAs at
+n_paths=1500, quantifies MC-noise share of the gap (predict smoothed V2
+~1.455-1.460; if ≤1.4443 the gate scoring itself is the issue); (b)
+`/tmp/diag_v2_marginals.log` — 60 PAs × 200 paths marginals + bin occupancy.
+
+**Candidate fixes, ordered (post-diagnosis):** (i) variance-honest scoring/
+paths for MC sources (Laplace + n_paths≥1000, or Rao-Blackwellize the terminal
+step — accumulate fractional outcome mass instead of sampling); (ii) the
+in-play split: isolate cascade-vs-sequence cause, then either rebuild
+`xwoba_outcome_map` for the V2-era feature distribution or recalibrate
+contact_quality; (iii) per-matchup over-spread (cascade compression 2.62× +
+strong adaLN) — shrinkage on the cell dists. ml-research gate applies to any
+NEW method (e.g. spread shrinkage); map rebuild + scoring fixes are documented
+project conventions.
+
+**Tooling added (committed):** driver `--save-dists`; `diagnose_backtest_dists`;
+`g_compute_v2(step_capture_fn=)` hook (active-masked);
+`diagnose_v2_rollout_marginals` (closed-loop per-count marginals + bin
+occupancy); torch seeding in `backtest_v2_remote`.
+
+## 🟡🟡🟡 (superseded) V2 backtest launch notes (2026-06-09 evening)
 
 **Run:** `PYTHONPATH=. caffeinate -i python -m scripts.hitter.run_backtest_v2_modal
 --n 800 --n-paths 300 --seed 0 > /tmp/backtest_v2.log` (background). Phases:
