@@ -1,9 +1,53 @@
 # ContextSwitcher — Pick up where this session left off
 
-**Last updated**: 2026-06-09 (late) — V2 BACKTEST RAN: **WALKS FIXED (BB 8.7%
-vs 9.25% real — v7 5.2, v8/v9 6.4) but log-loss GATE FAILED** (1.4801–1.4858
-vs lookup 1.4435). Diagnosis underway — gap decomposed; two confirmatory runs
-in flight (1500-path MC-noise test, 60-PA rollout marginals).
+**Last updated**: 2026-06-09 (night) — V2 BACKTEST DIAGNOSIS COMPLETE. Walks
+FIXED (8.7% vs 9.25%). At n_paths=1500 the log-loss is **1.4521** — first
+version EVER to beat baseline (1.4631); remaining gap to lookup (1.4435) is
+only **0.009**, concentrated in K placement. 75% of the original 0.037 "gate
+fail" was Monte-Carlo estimator tax (floor events + binomial noise at 300
+paths), NOT model error. See 🔶 section for the fix list before re-gating.
+
+## ✅ FINAL DIAGNOSIS SUMMARY (2026-06-09 night)
+
+| run | log-loss | note |
+|---|---|---|
+| V2 @300 paths | 1.4801–1.4858 | original gate protocol — FAIL by 0.037 |
+| V2 @300, Laplace-smoothed | 1.4634 | floor artifact removed |
+| **V2 @1500 paths** | **1.4521** | zero floor events, smoothing no-op; 558s run (vs 324s @300 — just use 1500) |
+| lookup (analytic) | 1.4435 | paths-independent |
+| baseline | 1.4631 | V2 BEATS it — v7/v8/v9 never did |
+
+**Remaining real gap (~0.009) decomposed:** (a) K placement — on actual-K PAs
+V2 gives 21.7% to K vs baseline's 23.3%; pitcher-K% corr 0.253 vs lookup's
+0.281 (batter-side corr both high ~0.7 — cascade-driven); (b) FF over-thrown
+at hitter counts in rollout (2-0 +13.4pp, 3-1 +8.7, 0-0 +9.0; pitcher-ahead
+counts near-perfect) — CAVEAT: marginals run used stand=R/throws=R for all
+(JSON lacks handedness; add to --save-dists). (c) shrinkage λ* @1500 = 0.8
+(only −0.0012) — over-spread mostly WAS the MC noise. (d) 2B +2.3pp is mostly
+sample doubles-light (real 3.0% vs league ~4.6%) + shared map behavior
+(lookup +1.6pp too); in-play out share fine (0.660 vs 0.667).
+
+**Fix list before re-gating (cheap → expensive):**
+1. Make n_paths=1500 the gate standard (same wall-clock, removes estimator
+   tax; lookup unaffected). Honest framing: under the ORIGINAL 300-path
+   protocol V2 fails by 0.037; the protocol conflated model quality with MC
+   noise — v8 (1.4762@300) vs V2 (1.4801@300) was never a fair model
+   comparison either.
+2. Per-count type temperatures (v1 already has `count_temperatures`
+   convention) → targets the FF over-commit at hitter counts. Extend
+   calibrate_v2 + apply count-conditional T in NuisanceModelsV2/g_compute_v2.
+3. Save throws/stand in --save-dists; re-run marginals with real handedness
+   to confirm the FF over-commit size.
+4. K placement: lookup leads via pitcher-side signal; check putaway-pitch
+   (2-strike) sequencing + whiff alignment. Possibly map/cascade era check
+   (map=2023, eval=2024H2-2025).
+5. Only AFTER 1-4 re-gate; scale to small ONLY on pass (capacity won't fix
+   K placement; architecture already beats 27M models on type accuracy).
+
+**Artifacts:** per-PA dists at `data/backtests/v2_n800_p{300,1500}_seed0.json`;
+diagnostics `scripts/hitter/diagnose_backtest_dists.py`,
+`scripts/hitter/diagnose_v2_rollout_marginals.py` (uses new
+`g_compute_v2(step_capture_fn=)` hook, active-masked).
 
 ## 🔶🔶🔶 V2 BACKTEST RESULT + DIAGNOSIS (2026-06-09 late)
 
