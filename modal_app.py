@@ -89,6 +89,9 @@ def train_remote(
     ab_outcome_head: bool = True,  # ADR-014 — set False for v8
     result_loss_weight: Optional[float] = None,  # override result head weight (v8: 0.3)
     location_loss_weight: float = 1.0,  # MDN NLL weight
+    train_first_pitch: bool = False,  # v9: train NC-1 for first-pitch prediction
+    noise_p: float = 0.0,  # v9: input perturbation probability (0=off, 0.2=recommended)
+    noise_ramp_steps: int = 3000,  # v9: steps to ramp noise from 0 to noise_p
 ) -> dict:
     """Remote A100 training. Reads data from the mounted Volume, writes
     checkpoints back to the Volume. Returns the local-training summary dict.
@@ -126,10 +129,57 @@ def train_remote(
         ab_outcome_head=ab_outcome_head,
         result_loss_weight=result_loss_weight,
         location_loss_weight=location_loss_weight,
+        train_first_pitch=train_first_pitch,
+        noise_p=noise_p,
+        noise_ramp_steps=noise_ramp_steps,
     )
 
     # Make sure files we wrote to the Volume are flushed for the next call /
     # external readers (``modal volume get``).
+    volume.commit()
+    return summary
+
+
+@app.function(
+    image=image,
+    gpu="L4",
+    volumes={"/data": volume},
+    timeout=60 * 60 * 24,
+)
+def train_v2_remote(
+    size: str = "tiny",
+    fold_id: int = 0,
+    epochs: int = 3,
+    max_steps: Optional[int] = None,
+    max_pitches: Optional[int] = None,
+    batch_size: int = 256,
+    run_name: Optional[str] = None,
+    seed: int = 42,
+    noise_p: float = 0.0,
+    noise_ramp_steps: int = 3000,
+    log_every: int = 50,
+    eval_every: int = 1000,
+) -> dict:
+    """Remote training for PitchGPTV2 (base-v1c)."""
+    from scripts.train_v2 import train
+
+    summary = train(
+        augmented_dir=Path("/data/augmented"),
+        profiles_dir=Path("/data/profiles"),
+        ckpt_dir=Path("/data/checkpoints"),
+        fold_id=fold_id,
+        size=size,
+        epochs=epochs,
+        max_steps=max_steps,
+        max_pitches=max_pitches,
+        batch_size=batch_size,
+        run_name=run_name,
+        seed=seed,
+        noise_p=noise_p,
+        noise_ramp_steps=noise_ramp_steps,
+        log_every=log_every,
+        eval_every=eval_every,
+    )
     volume.commit()
     return summary
 
@@ -178,6 +228,9 @@ def main(
     no_ab_outcome_head: bool = False,  # ADR-014 — v8 sets True
     result_loss_weight: Optional[float] = None,  # v8: 0.3
     location_loss_weight: float = 1.0,
+    train_first_pitch: bool = False,  # v9
+    noise_p: float = 0.0,  # v9
+    noise_ramp_steps: int = 3000,  # v9
 ):
     """Convenience entrypoint for `modal run modal_app.py`."""
     summary = train_remote.remote(
@@ -203,6 +256,9 @@ def main(
         ab_outcome_head=not no_ab_outcome_head,
         result_loss_weight=result_loss_weight,
         location_loss_weight=location_loss_weight,
+        train_first_pitch=train_first_pitch,
+        noise_p=noise_p,
+        noise_ramp_steps=noise_ramp_steps,
     )
     print("\nRemote training complete:")
     import json
@@ -240,7 +296,7 @@ def card_remote(task: dict) -> dict:
     os.chdir("/")
     dev = "cuda" if torch.cuda.is_available() else "cpu"
     nz = NuisanceModels(
-        Path("/data/checkpoints/small-fold0-v7/checkpoint_calibrated.pt"), device=dev)
+        Path("/data/checkpoints/small-fold0-v8/checkpoint_calibrated.pt"), device=dev)
     ctx = load_hitter_ctx("/data/checkpoints/hitter", profiles_dir="/data/profiles")
 
     date = task["date"]
@@ -278,7 +334,7 @@ def bench_cell(n_paths: int = 500, n_cells: int = 3) -> dict:
     dev = "cuda" if torch.cuda.is_available() else "cpu"
     t = time.time()
     nz = NuisanceModels(
-        Path("/data/checkpoints/small-fold0-v7/checkpoint_calibrated.pt"), device=dev)
+        Path("/data/checkpoints/small-fold0-v8/checkpoint_calibrated.pt"), device=dev)
     ctx = load_hitter_ctx("/data/checkpoints/hitter", profiles_dir="/data/profiles")
     load_s = time.time() - t
     bats = [BatterSpec(id=b, name=str(b), stand="R")
@@ -341,7 +397,7 @@ def backtest_remote(task: dict) -> list[dict]:
     if _BT_NZ is None:                       # load once per warm container
         dev = "cuda" if torch.cuda.is_available() else "cpu"
         _BT_NZ = NuisanceModels(
-            Path("/data/checkpoints/small-fold0-v7/checkpoint_calibrated.pt"), device=dev)
+            Path("/data/checkpoints/small-fold0-v8/checkpoint_calibrated.pt"), device=dev)
         _BT_CTX = load_hitter_ctx("/data/checkpoints/hitter", profiles_dir="/data/profiles")
 
     gate = PositivityGate()
@@ -363,6 +419,69 @@ def backtest_remote(task: dict) -> list[dict]:
     return out
 
 
+# ---- V2 per-PA backtest fan-out: PitchGPTV2+cascade outcome dist ------------
+# Same contract as backtest_remote, but the pitch source is PitchGPTV2
+# (adaLN + GMM) via g_compute_v2. The cascade is unchanged — it receives
+# exact continuous values from the GMM instead of bin conversions.
+_BTV2_NZ = None
+_BTV2_CTX = None
+_BTV2_CKPT = None
+
+
+@app.function(image=card_image, gpu="T4", volumes={"/data": volume},
+              timeout=60 * 60, max_containers=10)
+def backtest_v2_remote(task: dict) -> list[dict]:
+    """Roll out PitchGPTV2+cascade per-PA outcome dists for a chunk of real PAs.
+
+    ``task = {"specs": [{idx, pitcher_id, batter_id, throws, stand, game_date,
+    game_pk}, ...], "n_paths": int, "rng_seed": int, "ckpt": str}``. Returns
+    ``[{"idx": int, "dist": {7-class outcome dist}}]``.
+    """
+    import os
+    os.chdir("/")
+    global _BTV2_NZ, _BTV2_CTX, _BTV2_CKPT
+    from pathlib import Path
+    import numpy as np
+    import torch
+    from causal.nuisance_v2 import NuisanceModelsV2
+    from causal.g_computation_v2 import g_compute_v2
+    from causal.g_computation import AB_OUTCOME_NAMES
+    from mcsim.state import ReferenceContext, build_synthetic_ab
+    from hitter.rollout import load_hitter_ctx, build_cell_step_fn
+
+    ckpt = task.get("ckpt", "/data/checkpoints/tiny-v1c-base/checkpoint_calibrated.pt")
+    if _BTV2_NZ is None or _BTV2_CKPT != ckpt:     # load once per warm container
+        dev = "cuda" if torch.cuda.is_available() else "cpu"
+        _BTV2_NZ = NuisanceModelsV2(
+            Path(ckpt), device=dev, profiles_dir=Path("/data/profiles"))
+        _BTV2_CTX = load_hitter_ctx("/data/checkpoints/hitter",
+                                    profiles_dir="/data/profiles")
+        _BTV2_CKPT = ckpt
+
+    context = ReferenceContext()                   # neutral 0-0, empty bases
+    n_paths = task["n_paths"]
+    base_seed = task["rng_seed"]
+    out = []
+    for j, s in enumerate(task["specs"]):
+        throws = s["throws"] if s["throws"] in ("R", "L") else "R"
+        stand = s["stand"] if s["stand"] in ("R", "L") else "R"
+        ab = build_synthetic_ab(
+            pitcher_id=int(s["pitcher_id"]), batter_id=int(s["batter_id"]),
+            game_date=s["game_date"], pitcher_throws=throws, batter_stand=stand,
+            ballpark_id=0, umpire_id=0, catcher_id=0,
+            context=context, game_pk=int(s["game_pk"]))
+        step_fn = build_cell_step_fn(
+            _BTV2_CTX, pitcher_id=int(s["pitcher_id"]), batter_id=int(s["batter_id"]),
+            stand=stand, throws=throws, game_date=s["game_date"])
+        r = g_compute_v2(
+            _BTV2_NZ, ab, intervention_position=0, intervention_type=None,
+            n_paths=n_paths, rng_seed=base_seed + j, hitter_step_fn=step_fn)
+        dist = {name: float(r.ab_outcome_distribution[i])
+                for i, name in enumerate(AB_OUTCOME_NAMES)}
+        out.append({"idx": int(s["idx"]), "dist": dist})
+    return out
+
+
 @app.function(image=card_image, gpu="T4", volumes={"/data": volume}, timeout=60 * 40)
 def row_remote(task: dict) -> dict:
     """Compute ONE pitcher's row of cells (pitcher x opposing lineup). Returns the
@@ -381,7 +500,7 @@ def row_remote(task: dict) -> dict:
     if _ROW_NZ is None:                       # load once per warm container
         dev = "cuda" if torch.cuda.is_available() else "cpu"
         _ROW_NZ = NuisanceModels(
-            Path("/data/checkpoints/small-fold0-v7/checkpoint_calibrated.pt"), device=dev)
+            Path("/data/checkpoints/small-fold0-v8/checkpoint_calibrated.pt"), device=dev)
         _ROW_CTX = load_hitter_ctx("/data/checkpoints/hitter", profiles_dir="/data/profiles")
 
     pitcher = task["pitcher"]; gate = PositivityGate(); context = ReferenceContext()
