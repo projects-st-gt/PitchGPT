@@ -187,6 +187,7 @@ def g_compute_v2(
     rng_seed: int | None = None,
     run_value_table: np.ndarray = DEFAULT_AB_RUN_VALUE,
     hitter_step_fn=None,
+    step_capture_fn=None,
 ) -> RolloutResult:
     """Run the Monte Carlo g-computation rollout for PitchGPTV2.
 
@@ -215,6 +216,10 @@ def g_compute_v2(
         hitter_step_fn: cascade step function. Required — V2 has no result head.
             Signature: (type_ids, zone_ids, balls, strikes, prev_type_ids,
                         prev_zone_ids, n_prev, **kwargs) -> (result_probs, outcome5).
+        step_capture_fn: optional diagnostics hook, called once per rollout step
+            with a dict of named per-path arrays INCLUDING the active mask —
+            capture code must mask to active paths (stats over terminated
+            paths inflate rates; see the 2026-06-05 measurement-bug note).
 
     Returns:
         RolloutResult with per-path outcomes and aggregates.
@@ -476,6 +481,21 @@ def g_compute_v2(
         result_ids[:, seq_pos] = torch.from_numpy(
             np.where(active, sampled_result + RESULT_ID_OFFSET, 0).astype(np.int64)
         )
+
+        if step_capture_fn is not None:
+            step_capture_fn({
+                "step": step,
+                "active": active.copy(),
+                "type_1idx": sampled_type_1idx.copy(),
+                "balls": clipped_balls.copy(),      # PRE-pitch count
+                "strikes": clipped_strikes.copy(),
+                "velo": velo.copy(), "spin": spin.copy(),
+                "plate_x": plate_x.copy(), "plate_z": plate_z.copy(),
+                "zone_ids": zone_ids.copy(),
+                "result_probs": rp_np.copy(),
+                "outcome5": oc5.copy(),
+                "sampled_result": sampled_result.copy(),
+            })
 
         # --- Update count + check termination --------------------------------
         balls, strikes = update_count(balls, strikes, sampled_result)
