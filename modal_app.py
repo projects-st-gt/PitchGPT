@@ -463,6 +463,10 @@ def backtest_v2_remote(task: dict) -> list[dict]:
     base_seed = task["rng_seed"]
     out = []
     for j, s in enumerate(task["specs"]):
+        # g_compute_v2 seeds its numpy rng from rng_seed, but the GMM head
+        # samples via torch's GLOBAL rng — seed it too or runs aren't
+        # reproducible (observed ±0.005 log-loss jitter between runs).
+        torch.manual_seed(base_seed + j)
         throws = s["throws"] if s["throws"] in ("R", "L") else "R"
         stand = s["stand"] if s["stand"] in ("R", "L") else "R"
         ab = build_synthetic_ab(

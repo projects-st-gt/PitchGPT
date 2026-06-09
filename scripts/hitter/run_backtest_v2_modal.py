@@ -55,6 +55,9 @@ def main() -> None:
                     help="V2 calibrated checkpoint path ON THE MODAL VOLUME")
     ap.add_argument("--skip-lookup", action="store_true",
                     help="skip the lookup anchor (faster; gate vs historical only)")
+    ap.add_argument("--save-dists", default=None,
+                    help="write per-PA dists (all sources) + actuals to this JSON "
+                         "for post-hoc diagnosis (default: data/backtests/<auto>.json)")
     args = ap.parse_args()
 
     t0 = time.time()
@@ -133,6 +136,30 @@ def main() -> None:
 
     print("\n=== V2 calibration-in-aggregate (mean pred vs real) ===")
     print(aggregate_calibration(v2_filled, actuals).to_string(index=False))
+
+    # Persist per-PA dists for diagnosis (which PAs drive the log-loss gap).
+    import json
+    from pathlib import Path as _P
+    save_path = args.save_dists or (
+        f"data/backtests/v2_n{args.n}_p{args.n_paths}_seed{args.seed}.json")
+    _P(save_path).parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "meta": {"n": args.n, "n_paths": args.n_paths, "seed": args.seed,
+                 "ckpt": args.ckpt, "window": [args.window_start, args.window_end]},
+        "pas": [
+            {"idx": i, "pitcher": int(r["pitcher"]), "batter": int(r["batter"]),
+             "game_pk": int(r["game_pk"]),
+             "game_date": pd.Timestamp(r["game_date"]).strftime("%Y-%m-%d"),
+             "actual": actuals[i],
+             "v2": v2_filled[i],
+             "lookup": (lookup_dists[i] if lookup_dists is not None else None),
+             "baseline": baseline}
+            for i, (_, r) in enumerate(sample.iterrows())
+        ],
+    }
+    with open(save_path, "w") as f:
+        json.dump(payload, f)
+    print(f"\n[saved] per-PA dists -> {save_path}")
 
     bb_pred = float(np.mean([d["BB"] for d in v2_filled]))
     bb_real = actuals.count("BB") / len(actuals)
