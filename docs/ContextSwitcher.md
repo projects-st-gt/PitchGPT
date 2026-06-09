@@ -1,6 +1,325 @@
 # ContextSwitcher — Pick up where this session left off
 
-**Last updated**: 2026-06-07 — small-v8 COMPLETE, gate FAILED. Root cause updated: MDN location works but model-generated pitch sequences are more hittable than real ones. Next: diagnose the rollout's type/zone distribution vs reality.
+**Last updated**: 2026-06-09 (evening) — base-v1c CALIBRATED (T=0.949), rollout
+NORMALIZATION BUG fixed, backtest wiring built. **800×300 BACKTEST RUNNING NOW**
+(`/tmp/backtest_v2.log`, background, driver `run_backtest_v2_modal`).
+
+## 🟡🟡🟡 IN FLIGHT: V2 backtest 800 PAs × 300 paths (2026-06-09 evening)
+
+**Run:** `PYTHONPATH=. caffeinate -i python -m scripts.hitter.run_backtest_v2_modal
+--n 800 --n-paths 300 --seed 0 > /tmp/backtest_v2.log` (background). Phases:
+sample → local lookup anchor (~35 min) → Modal fan-out `backtest_v2_remote`
+(T4, cap 10). The driver prints an explicit `=== GATE ===` verdict at the end
+(log-loss vs same-sample lookup + BB% within 1pp of real).
+
+**Done this session (committed on `hitter-swing-model`):**
+
+1. **`scripts/calibrate_v2.py`** (commit `1a0db1d`) — type-head temperature on
+   2024H1 val. Results: **T=0.9488**, NLL 1.2423→1.2412, ECE 0.011→0.024
+   (model nearly self-calibrated), top-1 0.4683. Named checks: π̂(FF)=0.3146
+   vs real 0.3152; first-pitch PAD mass 0.006 (v9's was 0.79); GMM teacher-
+   forced velo 89.09 vs real 89.11 mph; |plate_x|>1.1: 0.192 vs real 0.185
+   (slight over-dispersion — watch BB% direction). Calibrated ckpt at
+   `checkpoints_modal/tiny-v1c-base/checkpoint_calibrated.pt` AND pushed to
+   the Modal volume at `checkpoints/tiny-v1c-base/checkpoint_calibrated.pt`.
+
+2. **ROLLOUT NORMALIZATION BUG found + fixed** (same commit) — the committed
+   rollout fed RAW continuous values (velo≈88) into a model trained on
+   z-scores (≈0), and treated GMM samples (z-score space) as raw mph — the
+   clip to [60,110] pinned every velo at 60. Fix: `build_single_ab_batch_v2`
+   normalizes (nan→0 BEFORE normalizing, exactly mirroring training);
+   `g_compute_v2` denormalizes GMM samples for the cascade and writes clipped
+   values back normalized. `NuisanceModelsV2.forward` now applies
+   `temperatures["type"]` and refuses uncalibrated ckpts (v1 convention).
+   Tests: `tests/test_v2_rollout_norm.py` (7 convention tests, named values).
+
+3. **Backtest wiring** (commit `ed15f47`) — `modal_app.py::backtest_v2_remote`
+   (V2 analogue of backtest_remote; synthetic AB + build_cell_step_fn +
+   g_compute_v2) + `scripts/hitter/run_backtest_v2_modal.py` (same harness/
+   sample/scoring as v1 driver, explicit GATE verdict). Smoke (local, real AB
+   746196): π̂(FF)=0.501, velo 90.6 mph, AB len 4.05, 0 truncated, 300 paths
+   in 10.3s (~3× faster than v1's ~32s).
+
+**Facts for the scale decision:** adaLN MLP = 59% of params (tiny: 4.5M/7.7M;
+small would be 44.8M total, NOT the spec's 38M — implementation conditions 2
+LNs/block). Tiny val curve plateaued ~step 11-13K (top-1 ~0.475). Plan
+unchanged: gate pass → train small; gate fail → diagnose (per-count marginals,
+arsenal slope, walk decomposition) — capacity won't fix structural failures.
+
+## 🟢🟢🟢 base-v1c TRAINED — READY TO CALIBRATE + BACKTEST (2026-06-09)
+
+**Training complete:** `tiny-v1c-base-r2`, 3 epochs, 14,100 steps on Modal L4.
+**Checkpoint:** `checkpoints_modal/tiny-v1c-base/checkpoint.pt` (88MB, 7.7M params)
+**Best checkpoint:** `checkpoints_modal/tiny-v1c-base/checkpoint_best.pt`
+
+| Metric | V2 tiny (base-v1c) | V9 small | V8 small |
+|---|---|---|---|
+| Type top-1 (val, OOD) | **0.469** | 0.434 | 0.438 |
+| Parameters | 7.7M | 27M | 27M |
+| Architecture | adaLN + GMM | context tokens + bins | context tokens + bins + MDN |
+
+**The V2 tiny model beats both v8 and v9 on type accuracy with 1/3 the parameters.** The adaLN conditioning is working — the model is using the pitcher/batter profiles more effectively than the context-token approach.
+
+### What needs to happen next (in order)
+
+1. **Write V2 calibration script** (`scripts/calibrate_v2.py`). The V2 model has different heads than v9 — it needs its own calibration that fits temperatures for the type head. The GMM head may also benefit from calibration but start with type only.
+
+2. **Run calibration:**
+   ```bash
+   PYTHONPATH=. python -m scripts.calibrate_v2 \
+       --ckpt checkpoints_modal/tiny-v1c-base/checkpoint.pt
+   ```
+
+3. **Wire V2 into the backtest harness.** The existing `scripts/hitter/run_backtest_modal.py` uses NuisanceModels (v1). It needs to be extended (or a new script created) to use NuisanceModelsV2 + g_compute_v2. Key: the hitter cascade (XGBoost) is unchanged — only the pitch source changes.
+
+4. **Run the backtest:**
+   ```bash
+   python -m scripts.hitter.run_backtest_v2_modal --n 800 --n-paths 300
+   ```
+   Gate: log-loss < 1.4435, BB% within 1pp of real (~8-10%).
+
+5. **If gate passes:** Scale to small (6L/8H/d512, ~38M params) for the production checkpoint. Run `modal_app.py::train_v2_remote --size small --epochs 3 --run-name small-v1c-base`.
+
+6. **If gate fails:** Diagnose using the same tools as v9 (per-count type distribution, pitcher arsenal correlation, walk rate decomposition). Then try base-v1a (GIVT-style, spec already written).
+
+### What was built this session (2026-06-08/09)
+
+**New architecture (model/v2/ package):**
+
+| File | What it does |
+|---|---|
+| `model/v2/__init__.py` | Package init |
+| `model/v2/config.py` | V2Config dataclass — adaLN dims, GMM params, continuous normalization constants, tiny/small factories |
+| `model/v2/adaln.py` | AdaLNConditioner (MLP: pitcher+batter → 6,144 per-layer knobs) + AdaLayerNorm (replaces standard LN) |
+| `model/v2/transformer.py` | V2TransformerBlock with AdaLayerNorm instead of nn.LayerNorm, MultiHeadCausalAttention, FeedForward |
+| `model/v2/embeddings.py` | V2InputLayer: type embedding (8 vocab) + continuous projection (50-dim → d_model) + positional encoding |
+| `model/v2/heads.py` | TypeHead (weight-tied softmax, 8 classes) + ContinuousGMM (K=5 diagonal Gaussians over 4 dims) |
+| `model/v2/model.py` | PitchGPTV2 — wires everything together. forward() → type_logits + hidden; predict_continuous() → GMM params |
+| `model/v2/dataset.py` | V2AtBatDataset — position 0 = "before any pitch" start token; emits continuous values (not bins); collate function |
+
+**Training + rollout:**
+
+| File | What it does |
+|---|---|
+| `scripts/train_v2.py` | Training loop: type CE + GMM NLL loss, z-score normalization of continuous values, noise injection, AdamW cosine schedule |
+| `causal/nuisance_v2.py` | NuisanceModelsV2 — loads V2 checkpoint, wraps model for rollout. build_single_ab_batch_v2() for building rollout batches |
+| `causal/g_computation_v2.py` | g_compute_v2 — Monte Carlo rollout adapted for V2: samples type (softmax) → continuous (GMM) → cascade. plate_to_zone() for cascade compat |
+| `modal_app.py` | Added train_v2_remote function for Modal GPU training |
+
+**Tests (all passing):**
+
+| File | Tests |
+|---|---|
+| `tests/test_v2_model.py` | 25 tests: config, adaLN, transformer block, full model forward, GMM after type, param count |
+| `tests/test_v2_gmm.py` | 12 tests: GMM shapes, NLL, sampling, weight-tying, gradient flow, PAD embedding |
+| `tests/test_v2_dataset.py` | 5 tests: position 0 invariants, left-shift targets, padding, real data verification |
+
+**Diagnostic scripts (from v9 investigation, still useful):**
+
+| File | What it does |
+|---|---|
+| `scripts/hitter/diagnose_rollout_marginals.py` | Per-count type distribution: model vs real data. Run on V2 after calibration. |
+
+**Key design decisions documented:**
+
+| Document | What it covers |
+|---|---|
+| `docs/superpowers/specs/2026-06-08-base-v1c-design.md` | Full spec: architecture, training, rollout, evaluation |
+| `docs/superpowers/specs/2026-06-08-base-v1a-design.md` | Alternative GIVT-style spec (build after v1c is tested) |
+| `docs/superpowers/plans/2026-06-08-base-v1c.md` | Implementation plan (8 tasks, all completed) |
+| `.claude/skills/ml-research/SKILL.md` | ML literature research skill (hard gate: search before any ML change) |
+
+### How V2 differs from v9 (quick reference)
+
+| Aspect | V9 (PitchGPT) | V2 (PitchGPTV2) |
+|---|---|---|
+| Pitcher/batter conditioning | Context tokens at positions 0-2 (weak, additive via attention) | adaLN-Zero: 6,144 per-layer scale/shift knobs (strong, multiplicative) |
+| First pitch prediction | Position NC-1 = 2 (untrained, 79% PAD mass) | Position 0 (trained, real prediction) |
+| Velocity output | 10 bins → bin-to-mph conversion | GMM → exact mph directly |
+| Spin output | 8 bins → bin-to-rpm conversion | GMM → exact rpm directly |
+| Location output | 13 zones → MDN refines to (x,z) | GMM → exact (x,z) directly |
+| Zone head | 13-class softmax | None (location from GMM) |
+| Result head | 7-class softmax (detached trunk) | None (cascade handles outcomes) |
+| AB-outcome head | Optional 7-class per-pitch | None (cascade + count machine) |
+| Break prediction | Not predicted | Not yet (v1.1 — need pfx_x/pfx_z in augmented data) |
+| Continuous normalization | None (raw bins) | Z-score: (x - mean) / std per dimension |
+| Input representation | Sum of 10+ factor embeddings (all discrete) | Type embedding + 50-dim continuous/state projection |
+| Sequence structure | [ctx0, ctx1, ctx2, pitch0, pitch1, ...] | [start, pitch0, pitch1, ...] (no context tokens) |
+
+### Critical conventions for V2
+
+1. **Type IDs are 1-indexed in data (PAD=0, FF=1..FS=7).** The type head outputs 8 logits (including PAD). During rollout, slice indices 1:8 for real types and renormalize. During loss, use cross-entropy with ignore_index=-100.
+
+2. **Continuous values are z-score normalized.** Means and stds are stored in V2Config: `continuous_means = (88.38, 2254.70, 0.04, 2.24)`, `continuous_stds = (6.03, 361.77, 0.85, 0.98)`. The model sees normalized values; the rollout must DENORMALIZE after GMM sampling before passing to the cascade.
+
+3. **Position 0 is the start token.** type_ids=0 (PAD), continuous=zeros, result_ids=0 ("none"), count/outs/runners from the real game state. The model predicts pitch 1 from position 0.
+
+4. **The GMM is conditioned on the sampled type.** After sampling a type from the softmax, the type embedding is concatenated with the hidden state and fed to the GMM head. This means the GMM knows "this will be a slider" before predicting the slider's velocity/spin/location.
+
+5. **The cascade receives exact continuous values.** No bin conversion needed. plate_x/plate_z come directly from GMM sampling. release_speed and release_spin_rate come directly from GMM sampling (after denormalization). in_zone is computed from coordinates: `|plate_x| <= 0.83 and 1.5 <= plate_z <= 3.5`.
+
+6. **Input clamping is applied.** All embedding lookups and one-hot scatters clamp indices to valid ranges to prevent CUDA assertion errors on rare edge-case data.
+
+### v9 training (completed 2026-06-08, FAILED gate, superseded by V2)
+
+See the section below for the full v9 investigation history. Summary: v9 added noise injection + first-pitch training to v8. Type accuracy held (0.434 vs 0.438) but walk rate unchanged (6.4%). Pipeline fixes (velo/spin pass-through, in_zone from coordinates) improved log-loss slightly (1.5014 → 1.4844) but didn't fix walks. Root cause: context-token conditioning too weak (slope 0.84), model regresses toward league average.
+
+### ML research completed (2026-06-07/08/09)
+
+Three research runs using the ml-research skill:
+
+**1. Rollout drift (40 papers):** Noise injection (GNS ICML 2020), pushforward trick (ICLR 2022), CAT-K traffic sim (CVPR 2025), Long Horizon Temperature Scaling (ICML 2023). Applied noise injection in v9 — didn't help walk rate.
+
+**2. Architecture design (13 papers):** GIVT (ECCV 2024), Q-FAT (NeurIPS 2025), DiT adaLN-Zero (ICCV 2023), Decision Transformer (NeurIPS 2021), ScoutGPT (2026). Led to the V2 architecture.
+
+**3. Continuous vs discrete (13 papers):** Stewart et al. (AISTATS 2023), Chronos (Amazon 2024), weather models (GraphCast, Pangu-Weather). Led to GMM heads replacing bins.
+
+## 🔴🔴🔴 ARCHITECTURAL REDESIGN: base-v1c → base-v1a (2026-06-08)
+
+**v7-v9 all failed the backtest gate (log-loss 1.4435).** Exhaustive investigation found:
+
+| Version | Log-loss | BB% | BB real |
+|---|---|---|---|
+| lookup | 1.4435 | 8.0% | 9.25% |
+| v7 | 1.4846 | 5.2% | 9.3% |
+| v8 | 1.4762 | 6.4% | 9.3% |
+| v9 (noise injection + first-pitch training) | 1.5014 | 6.4% | 9.25% |
+| v9 + pipeline fixes (velo/spin/in_zone) | 1.4844 | 6.5% | 9.25% |
+
+**Root causes identified (2026-06-08 session):**
+
+1. **First-pitch prediction is untrained.** Position NC-1 (last context token)
+   was never given gradient signal. 79% of probability goes to PAD. Every
+   simulated AB starts from garbage. v9 added training here but 1 epoch wasn't
+   enough — FF still 22% vs real 36%.
+
+2. **Pitcher conditioning is too weak.** The pitcher profile sits in a context
+   token (position 0). The model under-attends to it. Slope = 0.84 — when a
+   pitcher throws 60% fastballs, the model predicts ~50%. It hedges toward the
+   league average instead of committing to what THIS pitcher does.
+
+3. **Velocity and spin are binned.** 10 velo bins, 8 spin bins. The cascade
+   needs continuous mph/rpm. Bin-to-continuous conversion loses information.
+   Pipeline fixes helped log-loss slightly but didn't fix walk rate.
+
+4. **Zone is a redundant step.** Model predicts 13 zones, then MDN refines to
+   exact coordinates. An unnecessary intermediate discretization.
+
+5. **Cascade gap is noise, not bias.** The cascade's 8.0% vs real 9.25% gap is
+   not statistically significant (p=0.22). Population BB% is 8.12%. The cascade
+   is fine — the problem is entirely in the pitch generation.
+
+**The fix: new architecture (base-v1c then base-v1a).**
+
+**base-v1c (Hybrid — build FIRST):**
+- Type embedding (proven) + continuous projection for velo/spin/break/location
+- adaLN-Zero conditioning: pitcher+batter profiles generate per-layer
+  scale/shift that modulates every transformer block. 6,144 conditioning
+  parameters per matchup. Can't be ignored (multiplicative, not additive).
+- First pitch at position 0 (no context tokens, no NC-1 hack)
+- GMM output head for all 6 continuous values (velo, spin, h-break, v-break,
+  plate_x, plate_z), conditioned on the sampled type
+- No zone head, no velo bins, no spin bins
+- ~38M params (25M backbone + 13M adaLN MLP)
+- Spec: `docs/superpowers/specs/2026-06-08-base-v1c-design.md`
+
+**base-v1a (GIVT-style — build AFTER v1c is tested):**
+- Same as v1c but type input is one-hot projected (no embedding lookup)
+- Cleaner uniform architecture, all inputs are continuous vectors
+- Tests whether the input representation matters
+- Spec: `docs/superpowers/specs/2026-06-08-base-v1a-design.md`
+
+**Literature basis (ml-research skill, 2026-06-08):**
+- GIVT (Tschannen et al., ECCV 2024): GMM heads on transformers
+- Q-FAT (NeurIPS 2025 Spotlight): GMM heads for sequential action prediction
+- DiT (Peebles & Xie, ICCV 2023): adaLN-Zero conditioning
+- ScoutGPT (2026): player-conditioned sports event transformer
+- Decision Transformer / Trajectory Transformer (NeurIPS 2021): mixed output strategies
+
+**What the cascade needs (no retraining):**
+The cascade was trained on real Statcast data with real mph, rpm, coordinates.
+The new model gives it exact values instead of bin conversions. The cascade
+receives BETTER inputs. No cascade changes needed.
+
+**Next step:** Write implementation plan for base-v1c → build → train on
+Modal → calibrate → backtest. If v1c passes, ship it. If not, build v1a.
+
+### v9 training (completed 2026-06-08, FAILED gate)
+
+small-v9 trained on Modal (3 epochs, 14,109 steps, ~4h wall-clock):
+- `--train-first-pitch` (added NC-1 to type/zone loss)
+- `--noise-p 0.2 --noise-ramp-steps 3000` (input perturbation)
+- All v8 flags (MDN, AR exec heads, type-conditioned, no AB-outcome)
+- Checkpoint: `checkpoints_modal/small-fold0-v9/checkpoint_calibrated.pt`
+- Calibration: type ECE 0.018, type top-1 0.434 (matched v8's 0.438)
+- Backtest: log-loss 1.5014 (WORSE than v8's 1.4762), BB 6.4% unchanged
+
+Pipeline fixes (velo/spin pass-through, in_zone from coordinates):
+- Improved log-loss to 1.4844 but BB still 6.5%
+
+### Diagnostic findings (2026-06-08 session)
+
+**Per-count type distribution diagnostic (diagnose_rollout_marginals.py):**
+- Model is OVER-dispersed (mean ΔH = +0.17 nats vs real)
+- FF under-predicted by 10-27pp at every count
+- Model's top-1 is wrong at 11/12 counts (predicts CH or SL when reality is FF)
+- PAD mass at NC-1 = 79% (untrained position)
+- PAD mass at trained positions = 0% (model is fine at pitch positions)
+
+**Pitcher profile usage check:**
+- Probability wasted on pitches pitcher doesn't throw: 7% at NC-1, 0.4% at NC+0
+- Correlation with pitcher's arsenal: r=0.887 at NC-1, r=0.847 at NC+0
+- Slope (how much model reacts to arsenal): 0.70 at NC-1, 0.84 at NC+0
+- Ideal slope = 1.0 — the model under-reacts to pitcher identity
+
+**Cascade investigation (two sub-agents, 2026-06-08):**
+- Cascade math is correct (result probabilities sum to 1.0)
+- Foul rates reasonable (0.49-0.54 by count)
+- Foul tip bug found (foul tips classified as contact not whiff) — wrong
+  direction, inflates walks by ~0.1pp
+- Cascade's 8.0% vs 9.25% gap is NOT statistically significant (p=0.22)
+- in_zone mismatch confirmed but fixing it alone made things worse (Probe 4)
+- Velocity/spin were frozen at per-type means — fixed but minimal impact
+
+### ML research completed (2026-06-07/08)
+
+**Rollout drift research (40 papers, 5 search threads):**
+- Noise injection (GNS ICML 2020, MeshGraphNets ICML 2021): proven in physics
+- Pushforward trick (ICLR 2022 Spotlight): formalized scheduled sampling for simulation
+- CAT-K (CVPR 2025): closest setting match (7M-param traffic sim), beat 102M model
+- Scheduled sampling for Transformers: only ~1 BLEU improvement (ACL 2019)
+- Long Horizon Temperature Scaling (ICML 2023): sequence-level temperature
+- Applied: noise injection in v9 — didn't help walk rate
+
+**Architecture research (13 papers):**
+- GIVT (ECCV 2024): GMM heads on transformers for continuous outputs
+- Q-FAT (NeurIPS 2025): validates GMM heads for sequential action prediction
+- DiT (ICCV 2023): adaLN-Zero for strong identity conditioning
+- Decision Transformer vs Trajectory Transformer (NeurIPS 2021): mixed output strategies
+- Applied: designed base-v1c and base-v1a architectures
+
+**Continuous vs discrete research (13 papers):**
+- Stewart et al. (AISTATS 2023): classification trains better features than regression
+- Chronos (Amazon 2024): 4096 bins works for time series
+- GIVT outperforms VQ-GAN/MaskGIT for image generation
+- Weather models (GraphCast, Pangu-Weather): pure MSE regression works for unimodal
+- Applied: decided on GMM heads for multi-modal continuous, softmax for categorical
+
+### New skill created: ml-research
+
+`.claude/skills/ml-research/SKILL.md` — HARD GATE: literature search before
+any ML training change, architecture mod, or generation strategy. Searches
+arxiv + related fields. Must complete before code.
+
+### Commits this session (hitter-swing-model branch)
+
+- diagnostic script: `scripts/hitter/diagnose_rollout_marginals.py`
+- v9 training flags: `--train-first-pitch`, `--noise-p`, `--noise-ramp-steps`
+- PAD masking in g_computation.py rollout
+- velo/spin bin-to-continuous conversion in nuisance.py
+- in_zone coordinate fix in hitter/rollout.py
+- ml-research skill + CLAUDE.md skill index update
+- base-v1c spec + base-v1a spec
 
 ## 🧵 THE THREAD — why we're building small-v8 (read this first)
 
