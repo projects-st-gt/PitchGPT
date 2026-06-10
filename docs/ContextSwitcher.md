@@ -1,6 +1,34 @@
 # ContextSwitcher — Pick up where this session left off
 
-**Last updated**: 2026-06-10 (evening) — **DEFINITIVE n=2400 GATE RUN DONE.**
+**Last updated**: 2026-06-10 (night) — **IMPROVEMENT TRIO IN FLIGHT (1,2,3)
++ fractional outcomes (6) DONE.** User decision: do 1,2,3 now; park 4 (low-
+rank adaLN) + 5 (K-stuff features) for "if we want more"; 6 implemented.
+
+## 🟠🟠🟠 v1c.1 IN FLIGHT (2026-06-10 night)
+
+1. **v1c.1 spin-axis TRAINING RUNNING on Modal** (`tiny-v1c1-sax`, L4, 3
+   epochs + noise 0.2, ~4h; log streams to `/tmp/train_v1c1.log`, monitor
+   armed). 4→6 continuous dims (append-only: velo, spin, plate_x, plate_z,
+   sax_sin, sax_cos); constants from 4.74M train pitches (sin −0.0687/0.6663,
+   cos −0.4601/0.5805); all widths cfg-driven; legacy 4-dim ckpts verified
+   unchanged (π̂(FF)=0.596, velo 91.3). Commit `<see log>`. WHY: cascade
+   trained on real spin_axis_sin/cos but rollout fed ZEROS → targets the
+   K −1.9pp residual. AFTER TRAINING: pull → calibrate_v2 → marginals
+   (+2-strike bands) → gate n=2400 @1500 paths (NOTE: new outcome map
+   changes the lookup anchor — driver recomputes same-sample).
+2. **2-strike putaway-location bands** added to the marginals diagnostic
+   (in-zone/edge/chase/waste by distance outside zone); base-model run in
+   flight (`bqquj5cdh`).
+3. **xwOBA outcome map REBUILT on 2024H1** (73,540 in-play balls, leakage-
+   safe; 2023 map at `xwoba_outcome_map.2023.bak.json`; pushed to volume).
+4. **`g_compute_v2(fractional_inplay=True)`** — terminal in-play paths
+   credit the exact 5-way split (Rao-Blackwellized last step; NOT a Markov
+   conversion; mid-AB sampling unchanged). Tested: unbiased + lower variance.
+   Default OFF; enable for cards after validating vs sampled on a real cell.
+   Parked per user: (4) low-rank adaLN audit, (5) per-type whiff/chase
+   profile features.
+
+**(2026-06-10 evening)** — **DEFINITIVE n=2400 GATE RUN DONE.**
 baseline 1.4719 / lookup 1.4585 / V2 1.4631 @1500 paths. **Paired Δ(V2−lookup)
 = +0.0046, 95% CI [−0.0017, +0.0106] — STATISTICAL TIE** (point estimate
 halved from n=800's +0.0086; the small sample was unlucky for V2). BB% 8.8 vs
