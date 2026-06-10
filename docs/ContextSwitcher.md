@@ -1,6 +1,17 @@
 # ContextSwitcher — Pick up where this session left off
 
-**Last updated**: 2026-06-09 (late night) — DIAGNOSIS CLOSED. V2 @1500 paths
+**Last updated**: 2026-06-10 — RESEARCH DONE, SPEC WRITTEN for v1c-cl
+(closed-loop fine-tune, CAT-K-adapted): see
+`docs/superpowers/specs/2026-06-10-v1c-cl-finetune-design.md`. Tiny model
+ARCHIVED at `checkpoints_modal/releases/tiny-v1c-base-cal-20260609.pt`
+(+ volume `checkpoints/releases/`). Scale verdict: NO base tier, NO 44.8M
+small (7-paper evidence; ceiling ~15-20M after low-rank adaLN audit).
+Diagnostic chain closed: hitter-count FF drift is real closed-loop at
++4-8pp (matched pitchers + neutral-context-corrected); step-0 = clean
+(real pitchers throw +5-6pp more FF at bases-empty/0-out — sim is RIGHT).
+NEXT: implement `scripts/finetune_v2_cl.py` per spec → eval ladder → re-gate.
+
+**(2026-06-09 late night)** — DIAGNOSIS CLOSED. V2 @1500 paths
 = 1.4521–1.4524 (beats baseline 1.4631, 0.009 behind lookup 1.4435), BB PASS.
 Per-count temperatures: implemented, fitted, NO-OP on the gate (teacher-forced
 model already calibrated per count — NLL 1.2412→1.2411). **FF over-commit at
