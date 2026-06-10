@@ -373,8 +373,13 @@ def g_compute_v2(
 
         # Read type prediction at the LAST position of the prefix.
         # type_logits[:, fwd_len-1, :] predicts the next pitch (at seq_pos).
+        # Temperature: count-conditional when calibrated — keyed by the count
+        # the PREDICTED pitch is thrown at (count_state_t[:, seq_pos]).
         pred_pos = fwd_len - 1
-        type_logits = out["type_logits"][:, pred_pos, :]  # (N, 8)
+        type_logits = nuisance.scale_type_logits(
+            out["type_logits"][:, pred_pos, :],            # (N, 8) raw
+            count_ids=count_state_t[:, seq_pos],
+        )
 
         # Mask out PAD (index 0) and renormalize over the 7 real types.
         type_logits_masked = type_logits.clone()

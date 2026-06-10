@@ -152,14 +152,44 @@ def test_batch_missing_velo_columns_ok(micro_cfg):
 # Temperature application in NuisanceModelsV2.forward
 # ---------------------------------------------------------------------------
 
-def test_forward_applies_type_temperature(tmp_path, micro_cfg):
+def test_scale_type_logits_flat(tmp_path, micro_cfg):
     path = _save_ckpt(tmp_path, micro_cfg, temperatures={"type": 2.0})
     nz = NuisanceModelsV2(path, device="cpu")
-    nz_raw = NuisanceModelsV2(path, device="cpu", apply_temperatures=False)
     batch = _micro_batch(micro_cfg)
-    scaled = nz.forward(batch)["type_logits"]
-    raw = nz_raw.forward(batch)["type_logits"]
-    assert torch.allclose(scaled, raw / 2.0, atol=1e-5)
+    raw = nz.forward(batch)["type_logits"]    # forward returns RAW logits
+    last = raw[:, -1, :]
+    scaled = nz.scale_type_logits(last)
+    assert torch.allclose(scaled, last / 2.0, atol=1e-6)
+    # apply_temperatures=False passes through.
+    nz_off = NuisanceModelsV2(path, device="cpu", apply_temperatures=False)
+    assert torch.allclose(nz_off.scale_type_logits(last), last)
+
+
+def test_scale_type_logits_per_count(tmp_path, micro_cfg):
+    import dataclasses
+    from dataclasses import asdict
+    model = PitchGPTV2(micro_cfg)
+    ckpt = {
+        "model_state_dict": model.state_dict(), "config": asdict(micro_cfg),
+        "size": "micro", "fold_id": 0, "step": 0, "schema_version": 2,
+        "temperatures": {"type": 1.5},
+        "count_temperatures": {"type": {"6": 2.0}},   # 2-0 count = id 6
+    }
+    path = tmp_path / "ckpt_cs.pt"
+    torch.save(ckpt, path)
+    nz = NuisanceModelsV2(path, device="cpu")
+    logits = torch.ones(3, 8)
+    logits[:, 1] = 4.0
+    counts = np.array([6, 0, 6])   # rows 0,2 at 2-0 -> T=2.0; row 1 -> flat 1.5
+    scaled = nz.scale_type_logits(logits, count_ids=counts)
+    assert torch.allclose(scaled[0], logits[0] / 2.0, atol=1e-6)
+    assert torch.allclose(scaled[1], logits[1] / 1.5, atol=1e-6)
+    assert torch.allclose(scaled[2], logits[2] / 2.0, atol=1e-6)
+    # Named behavior: T>1 at 2-0 REDUCES the modal type's probability.
+    p_flat = torch.softmax(logits[1] / 1.5, dim=-1)[1]
+    p_cs = torch.softmax(scaled[0], dim=-1)[1]
+    assert p_cs < p_flat, (
+        f"T=2.0 at 2-0 should shrink modal mass: {p_cs:.3f} vs flat {p_flat:.3f}")
 
 
 def test_uncalibrated_checkpoint_refused_by_default(tmp_path, micro_cfg):

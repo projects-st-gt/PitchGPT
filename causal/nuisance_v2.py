@@ -101,8 +101,12 @@ class NuisanceModelsV2:
 
         # Temperatures from scripts.calibrate_v2. Same convention as V1
         # NuisanceModels: refuse an uncalibrated checkpoint unless the caller
-        # opts out explicitly.
+        # opts out explicitly. count_temperatures (optional) hold one type-head
+        # temperature PER COUNT STATE of the predicted pitch — fitted because
+        # the flat-T model over-commits to FF at hitter counts (2-0 +13.4pp in
+        # rollout marginals, 2026-06-09).
         self.temperatures: dict[str, float] = ckpt.get("temperatures", {})
+        self.count_temperatures: dict[str, dict] = ckpt.get("count_temperatures", {})
         if apply_temperatures and not self.temperatures:
             raise RuntimeError(
                 f"{ckpt_path} has no 'temperatures' — run `scripts.calibrate_v2` "
@@ -168,9 +172,10 @@ class NuisanceModelsV2:
 
         Returns:
             {"type_logits": (B, T, 8), "hidden": (B, T, d_model)}
-            Both tensors are on CPU as float32. type_logits are
-            temperature-scaled (logits / T_type) when the checkpoint is
-            calibrated and apply_temperatures is True.
+            Both tensors are on CPU as float32. type_logits are RAW —
+            temperature scaling is count-conditional and the count of the
+            PREDICTED pitch is not part of this batch, so the caller applies
+            :meth:`scale_type_logits` at the point of use (g_compute_v2 does).
         """
         bd = self._to_device(batch)
         out = self.model(
@@ -185,15 +190,47 @@ class NuisanceModelsV2:
             pitch_number=bd["pitch_number"],
             padding_mask=bd["padding_mask"],
         )
-        type_logits = out["type_logits"].detach().cpu().float()
-        if self.apply_temperatures:
-            T = self.temperatures.get("type")
-            if T:
-                type_logits = type_logits / float(T)
         return {
-            "type_logits": type_logits,
+            "type_logits": out["type_logits"].detach().cpu().float(),
             "hidden": out["hidden"].detach().cpu().float(),
         }
+
+    # ---------- temperature scaling ----------
+
+    def scale_type_logits(
+        self,
+        logits: torch.Tensor,
+        count_ids=None,
+    ) -> torch.Tensor:
+        """Apply calibrated temperature(s) to type logits.
+
+        Args:
+            logits: (..., 8) raw type logits.
+            count_ids: optional int array/tensor of shape logits.shape[:-1] —
+                the count state (0..11) of the pitch being PREDICTED. When
+                given and the checkpoint has count_temperatures, each row is
+                scaled by its count's temperature (flat T as fallback for a
+                count missing from the fit). When None, the flat T applies.
+
+        Returns:
+            logits / T, same shape. Unchanged if apply_temperatures is False.
+        """
+        if not self.apply_temperatures:
+            return logits
+        T_flat = float(self.temperatures.get("type", 1.0))
+        ct = self.count_temperatures.get("type") if count_ids is not None else None
+        if ct:
+            cid = torch.as_tensor(np.asarray(count_ids), dtype=torch.long)
+            t_table = torch.full((12,), T_flat, dtype=logits.dtype)
+            for k, v in ct.items():
+                k = int(k)
+                if 0 <= k < 12:
+                    t_table[k] = float(v)
+            t = t_table[cid.clamp(0, 11)]
+            return logits / t.unsqueeze(-1)
+        if T_flat != 1.0:
+            return logits / T_flat
+        return logits
 
     # ---------- GMM prediction ----------
 

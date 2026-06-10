@@ -61,11 +61,29 @@ def main() -> None:
     ap.add_argument("--aug-dir", default="data/augmented")
     ap.add_argument("--hitter-dir", default="checkpoints/hitter")
     ap.add_argument("--seed", type=int, default=11)
+    ap.add_argument("--real-handedness", action="store_true",
+                    help="rebuild the deterministic PA sample to recover each "
+                         "matchup's true throws/stand (the saved JSON lacks them; "
+                         "without this flag every matchup is rolled out as R-vs-R)")
     args = ap.parse_args()
 
     payload = json.load(open(args.dists))
     pas = payload["pas"][: args.n_pas]
     print(f"rolling out {len(pas)} PAs x {args.n_paths} paths from {args.dists}")
+
+    hands: dict[int, tuple[str, str]] = {}
+    if args.real_handedness:
+        from hitter.backtest import load_terminal_pas, sample_pas
+        meta = payload["meta"]
+        full = load_terminal_pas(args.aug_dir, start=meta["window"][0],
+                                 end=meta["window"][1], verbose=False)
+        smp = sample_pas(full, meta["n"], seed=meta["seed"], max_per_matchup=3)
+        for i, (_, r) in enumerate(smp.iterrows()):
+            assert int(r["pitcher"]) == pas[i]["pitcher"] if i < len(pas) else True, \
+                "rebuilt sample does not match saved JSON order"
+            hands[i] = (str(r["p_throws"]), str(r["stand"]))
+        print(f"recovered real handedness for {len(hands)} PAs "
+              f"(deterministic resample, seed={meta['seed']})")
 
     nz = NuisanceModelsV2(args.ckpt)
     ctx = load_hitter_ctx(args.hitter_dir)
@@ -78,13 +96,16 @@ def main() -> None:
     import time
     t0 = time.time()
     for i, p in enumerate(pas, 1):
+        throws, stand = hands.get(i - 1, ("R", "R"))
+        throws = throws if throws in ("R", "L") else "R"
+        stand = stand if stand in ("R", "L") else "R"
         ab = build_synthetic_ab(
             pitcher_id=p["pitcher"], batter_id=p["batter"], game_date=p["game_date"],
-            pitcher_throws="R", batter_stand="R",  # marginals are hand-agnostic here
+            pitcher_throws=throws, batter_stand=stand,
             context=context, game_pk=p["game_pk"])
         step_fn = build_cell_step_fn(
             ctx, pitcher_id=p["pitcher"], batter_id=p["batter"],
-            stand="R", throws="R", game_date=p["game_date"])
+            stand=stand, throws=throws, game_date=p["game_date"])
         g_compute_v2(nz, ab, n_paths=args.n_paths, rng_seed=args.seed + i,
                      hitter_step_fn=step_fn, step_capture_fn=caps.append)
         if i % 10 == 0:

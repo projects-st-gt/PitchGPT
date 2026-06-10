@@ -105,6 +105,7 @@ def main() -> None:
 
     logits_acc: list[torch.Tensor] = []
     targets_acc: list[torch.Tensor] = []
+    tcount_acc: list[torch.Tensor] = []   # count state of the TARGET pitch
     pos0_pad_mass: list[np.ndarray] = []
 
     gmm_nll_sum, gmm_nll_n = 0.0, 0
@@ -150,6 +151,12 @@ def main() -> None:
             mask = type_targets != -100
             logits_acc.append(type_logits[mask])
             targets_acc.append(type_targets[mask])
+            # The target at position t is pitch t+1, thrown at the count
+            # stored at input position t+1 — shift count_state left by one.
+            cs = batch["count_state"].cpu()
+            target_count = torch.zeros_like(cs)
+            target_count[:, :-1] = cs[:, 1:]
+            tcount_acc.append(target_count[mask])
 
             # Named diagnostic: PAD probability mass at position 0 (the trained
             # first-pitch position — v9's untrained NC-1 had 79% here).
@@ -197,6 +204,40 @@ def main() -> None:
           f"{nll(logits, targets, T):>10.4f}  {ece_equal_mass(p0, tnp):>10.4f} "
           f"{ece_equal_mass(p1, tnp):>10.4f}  {acc:>7.4f}  {T:>7.4f}")
 
+    # --- Per-count temperatures -----------------------------------------------
+    # The flat-T model over-commits to FF at hitter counts in rollout (2-0
+    # +13.4pp, 2026-06-09 marginals). One temperature per count state of the
+    # predicted pitch (group-conditional temperature scaling — ATS/contextual-
+    # temperature family; arXiv:2409.19817, arXiv:2012.13575). Temperature is
+    # monotonic: it shrinks the modal type's EXCESS at overconfident counts
+    # but cannot reorder preferences.
+    tcounts = torch.cat(tcount_acc).long()
+    count_temps: dict[str, float] = {}
+    print(f"\n--- per-count temperatures (count of the predicted pitch) ---")
+    print(f"{'count':>5} {'n':>8}  {'T_cs':>7}  {'NLL_flat':>9} {'NLL_cs':>9}  "
+          f"{'FF_flat':>8} {'FF_cs':>7} {'FF_real':>8}")
+    nll_flat_sum, nll_cs_sum = 0.0, 0.0
+    for cs_id in range(12):
+        m = tcounts == cs_id
+        n_cs = int(m.sum())
+        if n_cs < 1000:
+            continue
+        lg, tg = logits[m], targets[m]
+        T_cs = fit_temperature(lg, tg)
+        count_temps[str(cs_id)] = T_cs
+        nll_f, nll_c = nll(lg, tg, T), nll(lg, tg, T_cs)
+        nll_flat_sum += nll_f * n_cs
+        nll_cs_sum += nll_c * n_cs
+        ff_flat = float(F.softmax(lg / T, dim=-1)[:, MODEL_TYPE_ID["FF"]].mean())
+        ff_cs = float(F.softmax(lg / T_cs, dim=-1)[:, MODEL_TYPE_ID["FF"]].mean())
+        ff_real = float((tg == MODEL_TYPE_ID["FF"]).float().mean())
+        b, s = cs_id // 3, cs_id % 3
+        print(f"  {b}-{s} {n_cs:>8,}  {T_cs:>7.4f}  {nll_f:>9.4f} {nll_c:>9.4f}  "
+              f"{ff_flat:>8.4f} {ff_cs:>7.4f} {ff_real:>8.4f}")
+    n_fit = int(sum((tcounts == int(k)).sum() for k in count_temps))
+    print(f"  overall NLL: flat {nll_flat_sum / n_fit:.4f} -> per-count "
+          f"{nll_cs_sum / n_fit:.4f}  ({len(count_temps)}/12 counts fitted)")
+
     # --- Named numerical checks (bug-prevention discipline) -------------------
     pad_mass = float(np.concatenate(pos0_pad_mass).mean())
     pi_post = F.softmax(logits / T, dim=-1)
@@ -231,9 +272,10 @@ def main() -> None:
 
     out_path = args.ckpt.with_name("checkpoint_calibrated.pt")
     ckpt["temperatures"] = {"type": T}
+    ckpt["count_temperatures"] = {"type": count_temps}
     ckpt["calibration_val_end"] = VAL_END
     torch.save(ckpt, out_path)
-    print(f"\ntemperatures: {{'type': {T:.4f}}}")
+    print(f"\ntemperatures: {{'type': {T:.4f}}}  + per-count for {len(count_temps)} counts")
     print(f"saved calibrated checkpoint -> {out_path}  (original {args.ckpt} unchanged)")
 
 
