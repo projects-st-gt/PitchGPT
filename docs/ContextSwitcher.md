@@ -1,11 +1,19 @@
 # ContextSwitcher — Pick up where this session left off
 
-**Last updated**: 2026-06-09 (night) — V2 BACKTEST DIAGNOSIS COMPLETE. Walks
-FIXED (8.7% vs 9.25%). At n_paths=1500 the log-loss is **1.4521** — first
-version EVER to beat baseline (1.4631); remaining gap to lookup (1.4435) is
-only **0.009**, concentrated in K placement. 75% of the original 0.037 "gate
-fail" was Monte-Carlo estimator tax (floor events + binomial noise at 300
-paths), NOT model error. See 🔶 section for the fix list before re-gating.
+**Last updated**: 2026-06-09 (late night) — DIAGNOSIS CLOSED. V2 @1500 paths
+= 1.4521–1.4524 (beats baseline 1.4631, 0.009 behind lookup 1.4435), BB PASS.
+Per-count temperatures: implemented, fitted, NO-OP on the gate (teacher-forced
+model already calibrated per count — NLL 1.2412→1.2411). **FF over-commit at
+hitter counts is CONFIRMED REAL + CLOSED-LOOP** (handedness-controlled: 2-0
++13.3pp, 3-1 +10.3, vs only +3.1pp teacher-forced at 2-0) → drives the
+contact-quality bin skew (high-third 0.448 vs 0.333) → 2B/HR up, out down →
+the 0.009. Temperature cannot fix closed-loop drift. NEXT = user decision:
+(A) accept + ship tiny as fuel, (B) rollout-time count-marginal correction
+(~1 day, ml-research first — label-shift/prior-correction family; also a
+mechanism test), (C) rollout-aware retraining (pushforward/CAT-K from the
+40-paper research; ~2-3 days + 4h GPU; principled exposure-bias fix; CAT-K
+CVPR 2025: 7M closed-loop-trained beat 102M). Recommendation: B as fast
+mechanism test, C if B confirms. Scale-to-small stays paused.
 
 ## ✅ FINAL DIAGNOSIS SUMMARY (2026-06-09 night)
 
