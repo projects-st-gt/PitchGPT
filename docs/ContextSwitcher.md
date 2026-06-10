@@ -1,6 +1,19 @@
 # ContextSwitcher — Pick up where this session left off
 
-**Last updated**: 2026-06-10 — RESEARCH DONE, SPEC WRITTEN for v1c-cl
+**Last updated**: 2026-06-10 (PM) — **v1c-cl RAN AND IS A MEASURED NEGATIVE.**
+Fine-tune executed cleanly (tether 0.80, top-1 cost 0.2pp, teacher-forced 2-0
+FF bias 3.1→1.4pp, rollout FF at hitter counts −2-3pp) but gate UNCHANGED:
+cl 1.4544 vs base 1.4521 @1500 paths (paired Δ +0.0023, CI [−0.003, +0.007]
+— true no-op). Literature's short-horizon caution (He 2021, Duckworth 2019)
+confirmed at T=4-6. **KEY STATISTICAL FACT: base-vs-lookup paired Δ =
++0.0086, 95% CI [−0.0025, +0.0188] — the gate is NOT statistically resolved
+at n=800.** tiny-v1c-base is in a statistical tie with the lookup, beats
+baseline, best aggregates, walks fixed. cl ckpt at
+`checkpoints_modal/tiny-v1c-cl/` (archive; base remains the fuel candidate).
+DECISION PENDING (user): accept base as fuel now vs one n=2400 run to
+resolve the tie sharply vs keep chasing (in-play map era / count-correction).
+
+**(2026-06-10 AM)** — RESEARCH DONE, SPEC WRITTEN for v1c-cl
 (closed-loop fine-tune, CAT-K-adapted): see
 `docs/superpowers/specs/2026-06-10-v1c-cl-finetune-design.md`. Tiny model
 ARCHIVED at `checkpoints_modal/releases/tiny-v1c-base-cal-20260609.pt`
