@@ -1,6 +1,18 @@
 # ContextSwitcher — Pick up where this session left off
 
-**Last updated**: 2026-06-10 (PM) — **v1c-cl RAN AND IS A MEASURED NEGATIVE.**
+**Last updated**: 2026-06-10 (evening) — **DEFINITIVE n=2400 GATE RUN DONE.**
+baseline 1.4719 / lookup 1.4585 / V2 1.4631 @1500 paths. **Paired Δ(V2−lookup)
+= +0.0046, 95% CI [−0.0017, +0.0106] — STATISTICAL TIE** (point estimate
+halved from n=800's +0.0086; the small sample was unlucky for V2). BB% 8.8 vs
+real 8.7 (PASS, essentially exact). Aggregates: out +0.2pp, 1B −0.2, BB +0.1
+(excellent); residuals K −1.9pp (the clearest miss), 2B +0.9, HR +0.8 (both
+shrank vs n=800 — doubles-light-sample read confirmed). Resolving a ±0.005
+gap needs ~10K PAs — diminishing returns. Dists at
+`data/backtests/v2_n2400_p1500_seed0.json`. DECISION PENDING (user): declare
+the fuel acceptable (tied w/ lookup, beats baseline, walks exact) and
+unblock App A, with K −1.9pp + in-play map as the known improvement avenue.
+
+**(2026-06-10 PM)** — **v1c-cl RAN AND IS A MEASURED NEGATIVE.**
 Fine-tune executed cleanly (tether 0.80, top-1 cost 0.2pp, teacher-forced 2-0
 FF bias 3.1→1.4pp, rollout FF at hitter counts −2-3pp) but gate UNCHANGED:
 cl 1.4544 vs base 1.4521 @1500 paths (paired Δ +0.0023, CI [−0.003, +0.007]
