@@ -15,7 +15,9 @@ import torch
 
 from model.v2.config import V2Config, tiny_v2_config
 from model.v2.heads import ContinuousGMM, TypeHead
-from model.v2.embeddings import V2InputLayer, CONTINUOUS_DIM
+from model.v2.embeddings import V2InputLayer, state_vec_dim
+
+CONTINUOUS_DIM = state_vec_dim(6)  # v1c.1 default width
 
 
 # ---------------------------------------------------------------------------
@@ -249,9 +251,12 @@ class TestV2InputLayer:
         )
 
     def test_continuous_dim_constant(self) -> None:
-        """CONTINUOUS_DIM should equal 4+8+12+3+8+15 = 50."""
-        assert CONTINUOUS_DIM == 50, (
-            f"CONTINUOUS_DIM expected 50, got {CONTINUOUS_DIM}"
+        """state_vec_dim: 6+8+12+3+8+15 = 52 (v1c.1); legacy 4-dim = 50."""
+        assert CONTINUOUS_DIM == 52, (
+            f"state_vec_dim(6) expected 52, got {CONTINUOUS_DIM}"
+        )
+        assert state_vec_dim(4) == 50, (
+            f"legacy state_vec_dim(4) expected 50, got {state_vec_dim(4)}"
         )
 
     def test_pad_type_zero_contribution(self, tiny_cfg: V2Config) -> None:

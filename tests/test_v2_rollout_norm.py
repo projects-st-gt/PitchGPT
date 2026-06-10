@@ -35,9 +35,11 @@ from causal.nuisance_v2 import (
 
 @pytest.fixture
 def micro_cfg() -> V2Config:
+    # Legacy 4-dim config (v1c) — pins back-compat for old checkpoints.
     return V2Config(
         n_layers=1, n_heads=2, d_model=16, d_ff=32,
         adaln_hidden=8, pitcher_profile_dim=5, batter_profile_dim=3,
+        n_continuous=4,
     )
 
 

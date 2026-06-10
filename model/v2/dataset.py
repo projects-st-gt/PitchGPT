@@ -34,8 +34,10 @@ from model.pitchgpt_dataset import (
     ProfileStandardizer,
 )
 
-# The 4 continuous features in the order the model expects them.
-CONTINUOUS_COLS = ["release_speed", "release_spin_rate", "plate_x", "plate_z"]
+# Continuous features in the order the model expects them — APPEND-ONLY
+# (older 4-dim checkpoints slice the first n_continuous of this list).
+CONTINUOUS_COLS = ["release_speed", "release_spin_rate", "plate_x", "plate_z",
+                   "spin_axis_sin", "spin_axis_cos"]
 N_CONTINUOUS = len(CONTINUOUS_COLS)
 
 
@@ -68,8 +70,14 @@ class V2AtBatDataset(Dataset):
         pitcher_profile_lookup,
         batter_profile_lookup,
         profile_standardizer: Optional[ProfileStandardizer] = None,
+        n_continuous: int = N_CONTINUOUS,
     ):
-        missing = self.REQUIRED_COLS - set(pitches.columns)
+        if not 1 <= n_continuous <= N_CONTINUOUS:
+            raise ValueError(
+                f"n_continuous must be in [1, {N_CONTINUOUS}]; got {n_continuous}")
+        self._cont_cols = CONTINUOUS_COLS[:n_continuous]
+        self._n_continuous = n_continuous
+        missing = (self.REQUIRED_COLS | set(self._cont_cols)) - set(pitches.columns)
         if missing:
             raise KeyError(
                 f"V2AtBatDataset missing columns: {sorted(missing)}; "
@@ -120,8 +128,8 @@ class V2AtBatDataset(Dataset):
         runners_raw = rows["runners_state"].to_numpy(dtype=np.int64)  # 0..7
         pitch_num_raw = rows["pitch_number"].to_numpy(dtype=np.int64)  # 1..T
 
-        # Continuous: (T, 4). Replace NaN with 0.0.
-        cont_raw = rows[CONTINUOUS_COLS].to_numpy(dtype=np.float64)
+        # Continuous: (T, n_continuous). Replace NaN with 0.0.
+        cont_raw = rows[self._cont_cols].to_numpy(dtype=np.float64)
         cont_raw = np.nan_to_num(cont_raw, nan=0.0).astype(np.float32)
 
         # ---- Prepend start position (position 0 = "before any pitch") ----
@@ -132,7 +140,7 @@ class V2AtBatDataset(Dataset):
         type_ids = np.zeros(seq_len, dtype=np.int64)
         type_ids[1:] = type_ids_raw
 
-        continuous = np.zeros((seq_len, N_CONTINUOUS), dtype=np.float32)
+        continuous = np.zeros((seq_len, self._n_continuous), dtype=np.float32)
         continuous[1:] = cont_raw
 
         result_ids = np.zeros(seq_len, dtype=np.int64)
@@ -160,7 +168,7 @@ class V2AtBatDataset(Dataset):
         target_type = np.full(seq_len, PAD_ID, dtype=np.int64)
         target_type[:-1] = type_ids[1:]  # positions 0..(T-1) predict the next type
 
-        target_continuous = np.full((seq_len, N_CONTINUOUS), float("nan"), dtype=np.float32)
+        target_continuous = np.full((seq_len, self._n_continuous), float("nan"), dtype=np.float32)
         target_continuous[:-1] = continuous[1:]  # positions 0..(T-1) predict next continuous
 
         return {

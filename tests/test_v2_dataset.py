@@ -42,6 +42,8 @@ def _make_fake_pitch_row(
     pitcher: int = 12345,
     batter: int = 67890,
     game_date: str = "2024-04-01",
+    spin_axis_sin: float = 0.5,
+    spin_axis_cos: float = -0.5,
 ) -> dict:
     return {
         "game_pk": game_pk,
@@ -52,6 +54,8 @@ def _make_fake_pitch_row(
         "release_spin_rate": release_spin_rate,
         "plate_x": plate_x,
         "plate_z": plate_z,
+        "spin_axis_sin": spin_axis_sin,
+        "spin_axis_cos": spin_axis_cos,
         "result_id": result_id,
         "count_state": count_state,
         "outs_state": outs_state,

@@ -93,15 +93,16 @@ def main() -> None:
         pitcher_profile_lookup=pc_p.lookup,
         batter_profile_lookup=pc_b.lookup,
         profile_standardizer=std,
+        n_continuous=int(cfg.n_continuous),
     )
     loader = DataLoader(ds, batch_size=256, shuffle=False, num_workers=0,
                         collate_fn=collate_v2_at_bats)
     print(f"val: {len(val_pitches):,} pitches, {len(ds):,} at-bats")
 
-    c_mean = torch.tensor(cfg.continuous_means, device=device)
-    c_std = torch.tensor(cfg.continuous_stds, device=device)
-    c_mean_np = np.asarray(cfg.continuous_means, dtype=np.float64)
-    c_std_np = np.asarray(cfg.continuous_stds, dtype=np.float64)
+    c_mean = torch.tensor(cfg.continuous_means[: cfg.n_continuous], device=device)
+    c_std = torch.tensor(cfg.continuous_stds[: cfg.n_continuous], device=device)
+    c_mean_np = np.asarray(cfg.continuous_means, dtype=np.float64)[: cfg.n_continuous]
+    c_std_np = np.asarray(cfg.continuous_stds, dtype=np.float64)[: cfg.n_continuous]
 
     logits_acc: list[torch.Tensor] = []
     targets_acc: list[torch.Tensor] = []

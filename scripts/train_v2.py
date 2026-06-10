@@ -213,6 +213,7 @@ def compute_v2_losses(
     # in the NLL anyway.
     teacher_type = type_targets.clone()
     teacher_type[teacher_type == -100] = 0  # PAD idx for invalid positions
+    teacher_type = teacher_type.clamp(0, cfg.n_pitch_types - 1)  # defensive
     log_w, mu, log_std = model.predict_continuous(hidden, teacher_type)
 
     # Valid mask: type target is real AND all 4 continuous targets are finite.
@@ -258,10 +259,17 @@ def evaluate(
     type_correct = 0
     type_total = 0
 
+    c_mean = torch.tensor(cfg.continuous_means[: cfg.n_continuous], device=device)
+    c_std = torch.tensor(cfg.continuous_stds[: cfg.n_continuous], device=device)
+
     for i, batch in enumerate(loader):
         if i >= max_batches:
             break
         batch = move_to_device(batch, device)
+        batch["continuous"] = (batch["continuous"] - c_mean) / c_std
+        tc = batch["targets"]["continuous"]
+        fm = torch.isfinite(tc)
+        batch["targets"]["continuous"] = torch.where(fm, (tc - c_mean) / c_std, tc)
         out = model(
             pitcher_profile=batch["pitcher_profile"],
             batter_profile=batch["batter_profile"],
@@ -497,6 +505,18 @@ def train(
             set_lr(optim, lr)
 
             model.train()
+
+            # Z-score normalize continuous values (velo ~88mph, spin ~2255rpm
+            # vs plate_x ~0.04ft — without this the GMM loss is dominated by
+            # spin and the type head gets no gradient signal)
+            c_mean = torch.tensor(cfg.continuous_means[: cfg.n_continuous], device=device)
+            c_std = torch.tensor(cfg.continuous_stds[: cfg.n_continuous], device=device)
+            batch["continuous"] = (batch["continuous"] - c_mean) / c_std
+            tc = batch["targets"]["continuous"]
+            finite_mask = torch.isfinite(tc)
+            tc_normed = torch.where(finite_mask, (tc - c_mean) / c_std, tc)
+            batch["targets"]["continuous"] = tc_normed
+
             with torch.autocast(
                 device_type=device.type, dtype=amp_dtype, enabled=use_amp,
             ):

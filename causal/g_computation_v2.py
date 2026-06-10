@@ -266,9 +266,10 @@ def g_compute_v2(
     # step and read the LAST position's output.
 
     # Allocate extended tensors for the full rollout (start + max_steps pitches).
+    n_cont = int(nuisance.cfg.n_continuous)   # 4 (v1c) or 6 (v1c.1 +spin axis)
     max_seq = 1 + max_steps  # position 0 = start, positions 1..max_steps = pitches
     type_ids = torch.zeros(N, max_seq, dtype=torch.long)
-    continuous = torch.zeros(N, max_seq, 4, dtype=torch.float32)
+    continuous = torch.zeros(N, max_seq, n_cont, dtype=torch.float32)
     result_ids = torch.zeros(N, max_seq, dtype=torch.long)
     count_state_t = torch.zeros(N, max_seq, dtype=torch.long)
     outs_t = torch.zeros(N, max_seq, dtype=torch.long)
@@ -442,9 +443,18 @@ def g_compute_v2(
         plate_x = np.clip(plate_x, -2.5, 2.5)
         plate_z = np.clip(plate_z, 0.0, 5.0)
 
+        cols = [velo, spin, plate_x, plate_z]
+        sax_sin = sax_cos = None
+        if n_cont >= 6:
+            # v1c.1: spin axis (sin, cos) — clamp each to [-1, 1]; the pair
+            # is passed to the cascade which was trained on real sin/cos.
+            sax_sin = np.clip(cont_raw[:, 4].astype(np.float64), -1.0, 1.0)
+            sax_cos = np.clip(cont_raw[:, 5].astype(np.float64), -1.0, 1.0)
+            cols += [sax_sin, sax_cos]
+
         # Write the clipped values back into the sequence in NORMALIZED space
         # — the model's next forward pass expects its training input scale.
-        cont_clipped_raw = np.stack([velo, spin, plate_x, plate_z], axis=1)
+        cont_clipped_raw = np.stack(cols, axis=1)
         continuous[:, seq_pos] = torch.from_numpy(
             normalize_continuous(cont_clipped_raw, nuisance.cfg)
         )
@@ -464,10 +474,16 @@ def g_compute_v2(
         zids = zone_ids
         nprev = np.full(N, step, dtype=np.int64)
 
+        step_kwargs = dict(plate_x=plate_x, plate_z=plate_z,
+                           velo_native=velo, spin_native=spin)
+        if sax_sin is not None:
+            # The cascade trained on real spin_axis_sin/cos; v1c checkpoints
+            # (4-dim) fed zeros here — v1c.1 supplies the sampled axis.
+            step_kwargs["spin_axis_sin"] = sax_sin
+            step_kwargs["spin_axis_cos"] = sax_cos
         rp_np, oc5 = hitter_step_fn(
             tids, zids, balls, strikes, prev_type, prev_zone, nprev,
-            plate_x=plate_x, plate_z=plate_z,
-            velo_native=velo, spin_native=spin,
+            **step_kwargs,
         )
         result_probs_step = torch.from_numpy(rp_np.astype(np.float32))
         sampled_result = _sample_from_probs(result_probs_step, rng, active)

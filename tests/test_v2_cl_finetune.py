@@ -19,8 +19,10 @@ from scripts.finetune_v2_cl import _CLAMP_HI, _CLAMP_LO, build_substituted_batch
 
 @pytest.fixture
 def micro():
+    # Legacy 4-dim config (v1c) — the substitution logic must serve both.
     cfg = V2Config(n_layers=1, n_heads=2, d_model=16, d_ff=32,
-                   adaln_hidden=8, pitcher_profile_dim=5, batter_profile_dim=3)
+                   adaln_hidden=8, pitcher_profile_dim=5, batter_profile_dim=3,
+                   n_continuous=4)
     model = PitchGPTV2(cfg).eval()
     return cfg, model
 
@@ -93,11 +95,12 @@ def test_substituted_continuous_physically_plausible(micro):
     cfg, model = micro
     b = _batch(cfg)
     sub, _ = build_substituted_batch(model, b, cfg, k=3, p_sub=1.0)
-    c_mean = torch.tensor(cfg.continuous_means)
-    c_std = torch.tensor(cfg.continuous_stds)
+    n = cfg.n_continuous
+    c_mean = torch.tensor(cfg.continuous_means[:n])
+    c_std = torch.tensor(cfg.continuous_stds[:n])
     raw = sub["continuous"][:, 1:] * c_std + c_mean
-    lo = torch.tensor(_CLAMP_LO)
-    hi = torch.tensor(_CLAMP_HI)
+    lo = torch.tensor(_CLAMP_LO[:n])
+    hi = torch.tensor(_CLAMP_HI[:n])
     assert torch.isfinite(raw).all()
     assert (raw >= lo - 1e-3).all() and (raw <= hi + 1e-3).all(), (
         f"raw velo range {raw[..., 0].min():.1f}-{raw[..., 0].max():.1f} mph "

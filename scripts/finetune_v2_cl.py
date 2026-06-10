@@ -64,10 +64,11 @@ from scripts.train_v2 import (
     select_device,
 )
 
-# Physical clamp bounds in RAW units [velo mph, spin rpm, plate_x ft, plate_z ft]
-# — identical to causal.g_computation_v2's rollout clamps.
-_CLAMP_LO = (60.0, 800.0, -2.5, 0.0)
-_CLAMP_HI = (110.0, 3800.0, 2.5, 5.0)
+# Physical clamp bounds in RAW units [velo mph, spin rpm, plate_x ft,
+# plate_z ft, spin_axis_sin, spin_axis_cos] — identical to
+# causal.g_computation_v2's rollout clamps; sliced to cfg.n_continuous.
+_CLAMP_LO = (60.0, 800.0, -2.5, 0.0, -1.0, -1.0)
+_CLAMP_HI = (110.0, 3800.0, 2.5, 5.0, 1.0, 1.0)
 
 
 @torch.no_grad()
@@ -102,10 +103,11 @@ def build_substituted_batch(
     B, T = type_ids.shape
     device = type_ids.device
 
-    c_mean = torch.tensor(cfg.continuous_means, device=device)
-    c_std = torch.tensor(cfg.continuous_stds, device=device)
-    lo = torch.tensor(_CLAMP_LO, device=device)
-    hi = torch.tensor(_CLAMP_HI, device=device)
+    c_mean = torch.tensor(cfg.continuous_means[: cfg.n_continuous], device=device)
+    c_std = torch.tensor(cfg.continuous_stds[: cfg.n_continuous], device=device)
+    n_cont = int(cfg.n_continuous)
+    lo = torch.tensor(_CLAMP_LO[:n_cont], device=device)
+    hi = torch.tensor(_CLAMP_HI[:n_cont], device=device)
 
     coin = torch.rand(B, T, device=device, generator=generator)
 
@@ -288,8 +290,8 @@ def finetune(
     if device.type == "mps":
         gen = None  # MPS generator quirks; fall back to global seeding
 
-    c_mean = torch.tensor(cfg.continuous_means, device=device)
-    c_std = torch.tensor(cfg.continuous_stds, device=device)
+    c_mean = torch.tensor(cfg.continuous_means[: cfg.n_continuous], device=device)
+    c_std = torch.tensor(cfg.continuous_stds[: cfg.n_continuous], device=device)
 
     step = 0
     best_val = base_eval["loss_total"]

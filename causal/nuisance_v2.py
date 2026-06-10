@@ -33,22 +33,26 @@ from model.pitchgpt_dataset import ProfileStandardizer
 
 
 def normalize_continuous(raw: np.ndarray, cfg: V2Config) -> np.ndarray:
-    """Z-score normalize raw continuous values [velo, spin, plate_x, plate_z].
+    """Z-score normalize raw continuous values (first cfg.n_continuous dims of
+    [velo, spin, plate_x, plate_z, spin_axis_sin, spin_axis_cos]).
 
     The model was trained on normalized inputs (scripts.train_v2 normalizes
     after the dataset's nan->0 fill), so every rollout input must go through
-    this before forward().
+    this before forward(). Constants are sliced to cfg.n_continuous so a
+    legacy 4-dim config works against the 6-entry default tuples.
     """
-    mean = np.asarray(cfg.continuous_means, dtype=np.float32)
-    std = np.asarray(cfg.continuous_stds, dtype=np.float32)
+    n = int(cfg.n_continuous)
+    mean = np.asarray(cfg.continuous_means, dtype=np.float32)[:n]
+    std = np.asarray(cfg.continuous_stds, dtype=np.float32)[:n]
     return (np.asarray(raw, dtype=np.float32) - mean) / std
 
 
 def denormalize_continuous(normed: np.ndarray, cfg: V2Config) -> np.ndarray:
     """Invert :func:`normalize_continuous` — GMM samples live in z-score space
-    and must be mapped back to raw mph/rpm/feet before the cascade sees them."""
-    mean = np.asarray(cfg.continuous_means, dtype=np.float32)
-    std = np.asarray(cfg.continuous_stds, dtype=np.float32)
+    and must be mapped back to raw units before the cascade sees them."""
+    n = int(cfg.n_continuous)
+    mean = np.asarray(cfg.continuous_means, dtype=np.float32)[:n]
+    std = np.asarray(cfg.continuous_stds, dtype=np.float32)[:n]
     return np.asarray(normed, dtype=np.float32) * std + mean
 
 
@@ -356,9 +360,12 @@ def build_single_ab_batch_v2(
     runners_raw = ab_df["runners_state"].to_numpy(dtype=np.int64)  # 0..7
     pitch_num_raw = ab_df["pitch_number"].to_numpy(dtype=np.int64) # 1..T
 
-    # Continuous: [velo, spin, plate_x, plate_z]. reindex() yields NaN columns
-    # when a synthetic AB (mcsim.state.build_synthetic_ab) lacks velo/spin.
-    cont_cols = ["release_speed", "release_spin_rate", "plate_x", "plate_z"]
+    # Continuous columns sliced to the CHECKPOINT's width (4 for v1c, 6 from
+    # v1c.1 with spin axis). reindex() yields NaN columns when a synthetic AB
+    # (mcsim.state.build_synthetic_ab) lacks velo/spin.
+    from model.v2.dataset import CONTINUOUS_COLS
+    n_cont = int(nuisance.cfg.n_continuous)
+    cont_cols = CONTINUOUS_COLS[:n_cont]
     cont_raw = ab_df.reindex(columns=cont_cols).to_numpy(dtype=np.float32)
     cont_raw = np.nan_to_num(cont_raw, nan=0.0)
 
@@ -366,7 +373,7 @@ def build_single_ab_batch_v2(
     type_ids = np.zeros(seq_len, dtype=np.int64)
     type_ids[1:] = type_ids_raw
 
-    continuous = np.zeros((seq_len, 4), dtype=np.float32)
+    continuous = np.zeros((seq_len, n_cont), dtype=np.float32)
     continuous[1:] = cont_raw
     # Z-score normalize the FULL sequence, start token included. Training
     # normalizes after the dataset's nan->0 fill, so the start token's raw
@@ -408,7 +415,7 @@ def build_single_ab_batch_v2(
         "pitcher_profile": pp,                             # (N, pitcher_dim)
         "batter_profile": bp,                              # (N, batter_dim)
         "type_ids": _rep(type_ids),                        # (N, seq_len)
-        "continuous": _rep(continuous),                     # (N, seq_len, 4)
+        "continuous": _rep(continuous),                     # (N, seq_len, n_cont)
         "result_ids": _rep(result_ids),                    # (N, seq_len)
         "count_state": _rep(count_state),                  # (N, seq_len)
         "outs": _rep(outs),                                # (N, seq_len)
