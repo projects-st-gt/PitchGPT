@@ -1,8 +1,23 @@
 # ContextSwitcher — Pick up where this session left off
 
-**Last updated**: 2026-06-10 (night) — **IMPROVEMENT TRIO IN FLIGHT (1,2,3)
-+ fractional outcomes (6) DONE.** User decision: do 1,2,3 now; park 4 (low-
-rank adaLN) + 5 (K-stuff features) for "if we want more"; 6 implemented.
+**Last updated**: 2026-06-11 — **v1c.1 GATE RUN DONE: closest yet.** n=2400
+@1500 paths, NEW 2024H1 map (fresh same-sample lookup anchor 1.4593):
+baseline 1.4719 / lookup 1.4593 / **v1c.1 1.4620**. Paired Δ(v1c.1−lookup)
+= **+0.0027, 95% CI [−0.0033, +0.0085]** — tie, CI nearly centered on zero
+(base+old-map was +0.0046). BB 9.2 vs 8.7 PASS. Aggregates: 2B +0.5pp (was
++0.9), HR +0.2 (was +0.8) — map refresh worked; 1B/3B near-exact; **K −2.2pp
+(was −1.9) — the spin axis did NOT fix the K deficit**; mass went to outs.
+With putaway locations PROVEN real-identical (bands 0.412/0.163/0.249/0.176
+vs 0.412/0.163/0.258/0.167) and the axis now supplied, the remaining K
+suspect is the CASCADE's whiff response (whiff node AUC 0.787), not the
+pitch model. v1c.1 ckpt: `checkpoints_modal/tiny-v1c1-sax/
+checkpoint_calibrated.pt` (+ volume), top-1 0.4645, T=0.953. Training cost
+~3h L4. Tasks 4 (low-rank adaLN) + 5 (K-stuff features) parked per user;
+fractional_inplay implemented (default off, validate on a card cell before
+enabling). DECISION PENDING: ship v1c.1 as fuel / investigate cascade whiff.
+
+**(2026-06-10 night)** — IMPROVEMENT TRIO (1,2,3) + fractional outcomes (6).
+User decision: do 1,2,3 now; park 4 (low-rank adaLN) + 5 (K-stuff features).
 
 ## 🟠🟠🟠 v1c.1 IN FLIGHT (2026-06-10 night)
 
