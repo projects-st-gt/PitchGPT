@@ -184,6 +184,48 @@ def train_v2_remote(
     return summary
 
 
+@app.function(
+    image=image,
+    gpu="L4",
+    volumes={"/data": volume},
+    timeout=60 * 60 * 8,
+)
+def finetune_v2_cl_remote(
+    base_ckpt: str = "checkpoints/tiny-v1c-base/checkpoint.pt",
+    run_name: str = "tiny-v1c-cl",
+    max_steps: int = 2500,
+    batch_size: int = 256,
+    lr: float = 3e-5,
+    k_tether: int = 3,
+    p_sub_ramp_steps: int = 1000,
+    eval_every: int = 250,
+    seed: int = 42,
+) -> dict:
+    """Closed-loop fine-tune (v1c-cl) on Modal CUDA.
+
+    MPS train-mode forward produces NaN locally — all real fine-tuning runs
+    here. Spec: docs/superpowers/specs/2026-06-10-v1c-cl-finetune-design.md.
+    """
+    from scripts.finetune_v2_cl import finetune
+
+    summary = finetune(
+        ckpt_path=Path("/data") / base_ckpt,
+        augmented_dir=Path("/data/augmented"),
+        profiles_dir=Path("/data/profiles"),
+        ckpt_dir=Path("/data/checkpoints"),
+        run_name=run_name,
+        max_steps=max_steps,
+        batch_size=batch_size,
+        lr=lr,
+        k_tether=k_tether,
+        p_sub_ramp_steps=p_sub_ramp_steps,
+        eval_every=eval_every,
+        seed=seed,
+    )
+    volume.commit()
+    return summary
+
+
 @app.function(image=image, volumes={"/data": volume}, timeout=300)
 def list_data() -> dict:
     """Inventory check — verify what's on the Volume after upload."""
