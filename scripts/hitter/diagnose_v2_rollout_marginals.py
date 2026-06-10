@@ -173,6 +173,35 @@ def main() -> None:
     print(f"  ALL   {in_zone.mean():>10.3f}  {real['in_zone'].mean():>11.3f}"
           f"   {rp[:, BALL_COL].mean():>11.3f}  {real['is_ball'].mean():>9.3f}")
 
+    # ---- 2b. 2-strike putaway locations: edge bands, rollout vs real ------
+    # Bands by distance OUTSIDE the strike zone (0 = in-zone). The exact band
+    # edges are arbitrary but applied IDENTICALLY to rollout and real pitches,
+    # so the comparison is valid: if rollout putaway pitches are too central,
+    # the in-zone share is high and the edge/chase shares are low vs real.
+    def _dist_outside(x, z):
+        dx = np.maximum(np.abs(x) - 0.83, 0.0)
+        dz = np.maximum(np.maximum(1.5 - z, z - 3.5), 0.0)
+        return np.sqrt(dx ** 2 + dz ** 2)
+
+    def _bands(x, z):
+        d = _dist_outside(np.asarray(x, float), np.asarray(z, float))
+        return {
+            "in_zone": float((d == 0).mean()),
+            "edge_0.25": float(((d > 0) & (d <= 0.25)).mean()),
+            "chase_0.8": float(((d > 0.25) & (d <= 0.8)).mean()),
+            "waste": float((d > 0.8).mean()),
+        }
+
+    two_strike_roll = strikes_pre == 2
+    real_2s = real[real["count_state"] % 3 == 2]
+    rb = _bands(px[two_strike_roll], pz[two_strike_roll])
+    eb = _bands(real_2s["plate_x"].to_numpy(), real_2s["plate_z"].to_numpy())
+    print(f"\n=== 2-strike putaway location bands (rollout vs real) ===")
+    print(f"  {'band':>10} {'rollout':>9} {'real':>7}   (n_roll={int(two_strike_roll.sum()):,}, "
+          f"n_real={len(real_2s):,})")
+    for k in ("in_zone", "edge_0.25", "chase_0.8", "waste"):
+        print(f"  {k:>10} {rb[k]:>9.3f} {eb[k]:>7.3f}")
+
     # ---- 3. in-play split: bin occupancy + expected outcome dist ----------
     # Each oc5 row IS a map row; identify the bin by nearest-row match.
     d2 = ((oc5[:, None, :] - map_rows[None, :, :]) ** 2).sum(-1)

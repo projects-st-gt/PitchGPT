@@ -188,6 +188,7 @@ def g_compute_v2(
     run_value_table: np.ndarray = DEFAULT_AB_RUN_VALUE,
     hitter_step_fn=None,
     step_capture_fn=None,
+    fractional_inplay: bool = False,
 ) -> RolloutResult:
     """Run the Monte Carlo g-computation rollout for PitchGPTV2.
 
@@ -220,6 +221,12 @@ def g_compute_v2(
             with a dict of named per-path arrays INCLUDING the active mask —
             capture code must mask to active paths (stats over terminated
             paths inflate rates; see the 2026-06-05 measurement-bug note).
+        fractional_inplay: when True, a path that ends in-play contributes its
+            EXACT cascade 5-way outcome split instead of one sampled outcome
+            (Rao-Blackwellization of the terminal step only — mid-AB sampling
+            is unchanged; this is NOT a Markov-chain conversion). Lowers the
+            Monte-Carlo variance of outcome_dist and run_value at identical
+            n_paths; per-path run_value becomes the path's EXPECTED run value.
 
     Returns:
         RolloutResult with per-path outcomes and aggregates.
@@ -305,6 +312,9 @@ def g_compute_v2(
     terminal_kind = np.full(N, TERMINAL_KIND_NOT_YET, dtype=np.int64)
     log_weights = []
     hitter_inplay = np.full(N, -1, dtype=np.int64)
+    # Fractional terminal credit: per-path 5-way in-play split, recorded at
+    # the step the path went in-play (used only when fractional_inplay).
+    inplay_frac = np.zeros((N, 5), dtype=np.float64)
 
     # The observed AB's runners/outs stay constant within the AB (MVP simplification).
     obs_runners = int(batch["runners"][0, 0].item())
@@ -497,6 +507,7 @@ def g_compute_v2(
             p = oc5[i].astype(np.float64)
             ssum = p.sum()
             hitter_inplay[i] = int(rng.choice(5, p=p / ssum)) if ssum > 0 else 0
+            inplay_frac[i] = (p / ssum) if ssum > 0 else np.eye(5)[0]
 
         # Write result into the sequence (1-indexed).
         result_ids[:, seq_pos] = torch.from_numpy(
@@ -560,10 +571,26 @@ def g_compute_v2(
     ip = np.where(is_in_play & (hitter_inplay >= 0))[0]
     ab_outcome[ip] = _OC5_TO_AB[hitter_inplay[ip]]
 
-    # Run value lookup (NaN for truncated paths).
-    run_value = np.full(N, np.nan, dtype=np.float64)
     valid = ab_outcome >= 0
-    run_value[valid] = run_value_table[ab_outcome[valid]]
+
+    # Per-path 7-class outcome weights. Sampled mode: one-hot of the sampled
+    # outcome. Fractional mode: K/BB stay one-hot (they are deterministic
+    # given the path), in-play paths carry the cascade's exact 5-way split.
+    outcome_w = np.zeros((N, 7), dtype=np.float64)
+    if fractional_inplay:
+        is_ip_valid = valid & (terminal_kind == TERMINAL_KIND_IN_PLAY)
+        not_ip = valid & ~is_ip_valid
+        outcome_w[not_ip, ab_outcome[not_ip]] = 1.0
+        for j in range(5):
+            outcome_w[is_ip_valid, _OC5_TO_AB[j]] += inplay_frac[is_ip_valid, j]
+    else:
+        outcome_w[valid, ab_outcome[valid]] = 1.0
+
+    # Run value (NaN for truncated paths). Fractional mode: expected RV.
+    # Elementwise multiply+sum instead of matmul: macOS Accelerate BLAS emits
+    # spurious divide-by-zero warnings on small masked gemv calls.
+    run_value = np.full(N, np.nan, dtype=np.float64)
+    run_value[valid] = (outcome_w[valid] * run_value_table).sum(axis=1)
 
     # --- Aggregates -----------------------------------------------------------
     n_truncated = int((~valid).sum())
@@ -571,9 +598,7 @@ def g_compute_v2(
         mean_rv = float(np.nanmean(run_value))
         se_rv = float(np.nanstd(run_value, ddof=1) / np.sqrt(valid.sum()))
         mean_len = float((terminal_step[valid] + 1).mean())
-        outcome_dist = np.zeros(7, dtype=np.float64)
-        for c in range(7):
-            outcome_dist[c] = float((ab_outcome[valid] == c).mean())
+        outcome_dist = outcome_w[valid].mean(axis=0)
     else:
         mean_rv, se_rv, mean_len = float("nan"), float("nan"), float("nan")
         outcome_dist = np.full(7, np.nan)
