@@ -61,6 +61,10 @@ def main() -> None:
     ap.add_argument("--aug-dir", default="data/augmented")
     ap.add_argument("--hitter-dir", default="checkpoints/hitter")
     ap.add_argument("--seed", type=int, default=11)
+    ap.add_argument("--match-pitchers", action="store_true",
+                    help="restrict the real reference to the SAME pitchers as the "
+                         "rolled-out PA sample (controls matchup-selection bias: "
+                         "60 sampled pitchers vs league-wide mix)")
     ap.add_argument("--real-handedness", action="store_true",
                     help="rebuild the deterministic PA sample to recover each "
                          "matchup's true throws/stand (the saved JSON lacks them; "
@@ -127,7 +131,13 @@ def main() -> None:
     print(f"\ncaptured {n_pitches:,} active rollout pitch-paths")
 
     real = load_real_reference(args.aug_dir, args.real_months)
-    print(f"real reference: {len(real):,} pitches ({'+'.join(args.real_months)})")
+    if args.match_pitchers:
+        pitcher_ids = {p["pitcher"] for p in pas}
+        real = real[real["pitcher"].isin(pitcher_ids)]
+        print(f"real reference MATCHED to {len(pitcher_ids)} sampled pitchers: "
+              f"{len(real):,} pitches ({'+'.join(args.real_months)})")
+    else:
+        print(f"real reference: {len(real):,} pitches ({'+'.join(args.real_months)})")
 
     # ---- 1. per-count type distribution ----------------------------------
     print("\n=== per-count pitch-type distribution: rollout - real (pp) ===")
