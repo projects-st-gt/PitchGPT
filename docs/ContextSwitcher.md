@@ -1,6 +1,20 @@
 # ContextSwitcher — Pick up where this session left off
 
-**Last updated**: 2026-06-11 (PM) — **WHIFF SEQUENCE: steps 1+2 DONE, step 3
+**Last updated**: 2026-06-11 (late) — **STEP 3 (deception retrain) EXECUTED;
+RE-GATE IN FLIGHT** (`/tmp/backtest_deception.log`, n=2400 @1500,
+v1c1-sax + deception-aware cascade, fresh lookup anchor). Retrain result:
+swing/whiff AUC FLAT (0.869→0.868 / 0.787→0.787); real-pitch K shortfall
+0.0070→0.0068 (~nothing). The features now exist in the rollout path
+(g_compute_v2 passes prev velo/plate; lookup gets real prevs automatically)
+so the sim can RESPOND to sequencing — expected effect small. Old artifacts
+backed up: checkpoints/hitter/{swing,whiff}.pre_deception.bak.joblib.
+If the gate is flat: the K −2.2pp residual is established as NOT addressable
+via locations (proven identical), spin axis (supplied), per-count
+calibration (drift-rejected), or deception features (no signal) — remaining
+suspects: count-constant foul model at 2 strikes, or irreducible at current
+data/features. Then: decide ship-as-is.
+
+**(2026-06-11 PM)** — **WHIFF SEQUENCE: steps 1+2 DONE, step 3
 (deception retrain) NEXT.** Step 1 (isolation, `diagnose_whiff_isolation.py`
 — CAUTION: build_base_features RE-SORTS; labels/counts must come from X, the
 in-script assert guards this): cascade per-count calibration on real pitches
