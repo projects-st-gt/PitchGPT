@@ -57,6 +57,16 @@ class HitterModel:
         # this is a guard, not a fabricated value).
         self._foul_fallback = float(np.mean(list(self._foul_rates.values())))
 
+        # Optional per-count logit shifts for the binary nodes, fitted on
+        # 2024H1 by scripts.hitter.calibrate_cascade_counts (the cascade is
+        # well calibrated globally but ~1pp off per count exactly where K's
+        # are decided). Applied in predict_cascade when X carries
+        # balls/strikes. Absent file -> no-op.
+        self._count_cal: dict[str, dict[str, float]] = {}
+        cal_path = self._dir / "count_calibration.json"
+        if cal_path.exists():
+            self._count_cal = json.loads(cal_path.read_text()).get("deltas", {})
+
     @property
     def nodes(self) -> list[str]:
         return list(self._artifacts)
@@ -75,9 +85,28 @@ class HitterModel:
         """v0 S2b: P(foul | contact) for this count, with mean-foul fallback."""
         return self._foul_rates.get((int(balls), int(strikes)), self._foul_fallback)
 
-    def predict_cascade(self, X: pd.DataFrame) -> dict[str, np.ndarray]:
+    def predict_cascade(self, X: pd.DataFrame,
+                        apply_count_calibration: bool = True
+                        ) -> dict[str, np.ndarray]:
         """All node predictions for X at once (the compose.py entry point).
 
         Returns ``{swing, called_strike, whiff, contact_quality}`` -> arrays.
+        Per-count logit shifts (count_calibration.json) are applied to the
+        binary nodes when present and X carries balls/strikes.
         """
-        return {node: self.predict_node(node, X) for node in self._artifacts}
+        out = {node: self.predict_node(node, X) for node in self._artifacts}
+        if (apply_count_calibration and self._count_cal
+                and "balls" in X.columns and "strikes" in X.columns):
+            eps = 1e-6
+            balls = X["balls"].to_numpy().astype(int)
+            strikes = X["strikes"].to_numpy().astype(int)
+            for node, deltas in self._count_cal.items():
+                if node not in out or not deltas:
+                    continue
+                d = np.zeros(len(X))
+                for key, val in deltas.items():
+                    b, s = (int(v) for v in key.split(","))
+                    d[(balls == b) & (strikes == s)] = float(val)
+                p = np.clip(out[node].astype(np.float64), eps, 1 - eps)
+                out[node] = 1.0 / (1.0 + np.exp(-(np.log(p / (1 - p)) + d)))
+        return out
