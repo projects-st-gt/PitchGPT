@@ -92,6 +92,9 @@ def build_step_features(
     spin_native: np.ndarray | None = None,
     spin_axis_sin: np.ndarray | None = None,
     spin_axis_cos: np.ndarray | None = None,
+    prev_velo: np.ndarray | None = None,
+    prev_plate_x: np.ndarray | None = None,
+    prev_plate_z: np.ndarray | None = None,
 ) -> pd.DataFrame:
     """Build the cascade's per-pitch feature frame for one rollout step (N paths).
 
@@ -117,11 +120,34 @@ def build_step_features(
         spin = np.asarray(spin_native, float)
     else:
         spin = np.array([spin_by_type.get(int(t), _LEAGUE_SPIN) for t in tid], float)
-    in_zone = np.isin(zid, list(_IN_ZONE_IDS)).astype("int8")
+    # v9 fix: compute in_zone from coordinates when available (matches how the
+    # cascade was trained in hitter/features.py:add_zone_flag). Falls back to
+    # zone_id for the non-MDN path.
+    if plate_x is not None and plate_z is not None:
+        in_zone = ((np.abs(cx) <= 0.83) & (cz >= 1.5) & (cz <= 3.5)).astype("int8")
+    else:
+        in_zone = np.isin(zid, list(_IN_ZONE_IDS)).astype("int8")
     prev_in_zone = np.where(
         prev_zone_ids < 0, -1,
         np.isin(np.asarray(prev_zone_ids, int), list(_IN_ZONE_IDS)).astype(int),
     ).astype("int8")
+
+    # Deception lags — conventions mirror hitter.features.add_recent_pitch_lags
+    # EXACTLY: no previous pitch (n_prev==0) or no prev values supplied ->
+    # velo_diff 0.0, loc_dist -1.0, same_type vs prev_type_id (0 on first
+    # pitch since prev_type_id==0 never equals a real type 1..7).
+    first = np.asarray(n_prev, int) == 0
+    if prev_velo is not None:
+        prev_velo_diff = np.where(first, 0.0, velo - np.asarray(prev_velo, float))
+    else:
+        prev_velo_diff = np.zeros(n)
+    if prev_plate_x is not None and prev_plate_z is not None:
+        d = np.sqrt((cx - np.asarray(prev_plate_x, float)) ** 2
+                    + (cz - np.asarray(prev_plate_z, float)) ** 2)
+        prev_loc_dist = np.where(first, -1.0, d)
+    else:
+        prev_loc_dist = np.full(n, -1.0)
+    same_type_prev = (tid == np.asarray(prev_type_ids, int)).astype("int8")
 
     cols = {
         "type_id": tid.astype("int16"),
@@ -138,6 +164,9 @@ def build_step_features(
         "prev_type_id": np.asarray(prev_type_ids, "int16"),
         "prev_in_zone": prev_in_zone,
         "n_prev_pitches": np.asarray(n_prev, "int16"),
+        "prev_velo_diff": np.asarray(prev_velo_diff, "float32"),
+        "prev_loc_dist": np.asarray(prev_loc_dist, "float32"),
+        "same_type_prev": same_type_prev,
         "same_hand": np.full(n, int(same_hand), "int8"),
         "outs_when_up": np.zeros(n, "int16"),
     }

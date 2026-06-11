@@ -333,11 +333,18 @@ def g_compute_v2(
         # raw feet before the zone grid.
         prev_cont = denormalize_continuous(
             batch["continuous"][:, k].numpy(), nuisance.cfg
-        )  # (N, 4) raw
+        )  # (N, n_cont) raw
         prev_zone = plate_to_zone(prev_cont[:, 2], prev_cont[:, 3])
+        prev_velo = prev_cont[:, 0].astype(np.float64)
+        prev_px = prev_cont[:, 2].astype(np.float64)
+        prev_pz = prev_cont[:, 3].astype(np.float64)
     else:
         prev_type = np.zeros(N, dtype=np.int64)
         prev_zone = np.full(N, -1, dtype=np.int64)
+        # Values are ignored by the deception-lag conventions when n_prev==0.
+        prev_velo = np.zeros(N, dtype=np.float64)
+        prev_px = np.zeros(N, dtype=np.float64)
+        prev_pz = np.zeros(N, dtype=np.float64)
 
     # --- Main rollout loop ----------------------------------------------------
     # We iterate over pitch indices 0..max_steps-1. Each "step" produces pitch
@@ -485,7 +492,9 @@ def g_compute_v2(
         nprev = np.full(N, step, dtype=np.int64)
 
         step_kwargs = dict(plate_x=plate_x, plate_z=plate_z,
-                           velo_native=velo, spin_native=spin)
+                           velo_native=velo, spin_native=spin,
+                           prev_velo=prev_velo, prev_plate_x=prev_px,
+                           prev_plate_z=prev_pz)
         if sax_sin is not None:
             # The cascade trained on real spin_axis_sin/cos; v1c checkpoints
             # (4-dim) fed zeros here — v1c.1 supplies the sampled axis.
@@ -544,6 +553,9 @@ def g_compute_v2(
         # Update lag features for the next step.
         prev_type = sampled_type_1idx.copy()
         prev_zone = zone_ids.copy()
+        prev_velo = velo.copy()
+        prev_px = plate_x.copy()
+        prev_pz = plate_z.copy()
 
         if not active.any():
             break

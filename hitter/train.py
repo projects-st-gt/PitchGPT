@@ -39,6 +39,7 @@ import pandas as pd
 
 from hitter import labels as L
 from hitter.features import (
+    DECEPTION_FEATURE_COLS,
     BASE_FEATURE_COLS,
     attach_batter_profile,
     build_base_features,
@@ -199,8 +200,8 @@ _COMMON_FEATURES = BASE_FEATURE_COLS + _MOVEMENT_COLS + ["outs_when_up"] \
 #: minimal batter signal; S3 (contact_quality) adds park/roof/temp (Coors carry).
 _S3_FEATURES = _COMMON_FEATURES + ["ballpark_id", "roof_state", "temp_bucket"]
 NODE_FEATURES: dict[str, list[str]] = {
-    "swing": _COMMON_FEATURES,
-    "whiff": _COMMON_FEATURES,
+    "swing": _COMMON_FEATURES + DECEPTION_FEATURE_COLS,
+    "whiff": _COMMON_FEATURES + DECEPTION_FEATURE_COLS,
     "called_strike": (BASE_FEATURE_COLS + ["umpire_id", "catcher_id"]
                       + _BATTER_COLS),
     "contact_quality": _S3_FEATURES,

@@ -48,6 +48,21 @@ def add_recent_pitch_lags(df: pd.DataFrame) -> pd.DataFrame:
     if "in_zone" in out.columns:
         out["prev_in_zone"] = g["in_zone"].shift(1).fillna(-1).astype("int8")
     out["n_prev_pitches"] = (out["pitch_number"] - 1).clip(lower=0).astype("int16")
+
+    # Deception lags (2026-06-11, target the whiff under-prediction): how this
+    # pitch DIFFERS from the previous one is the mechanism of a swing-and-miss.
+    # Conventions (mirrored EXACTLY by hitter.rollout.build_step_features):
+    # first pitch / missing prev measurement -> velo_diff 0.0, loc_dist -1.0
+    # (sentinel, same as prev_in_zone), same_type vs prev_type_id=0 -> 0.
+    out["prev_velo_diff"] = (
+        (out["release_speed"] - g["release_speed"].shift(1))
+        .fillna(0.0).astype("float32"))
+    dx = out["plate_x"] - g["plate_x"].shift(1)
+    dz = out["plate_z"] - g["plate_z"].shift(1)
+    out["prev_loc_dist"] = (
+        np.sqrt(dx ** 2 + dz ** 2).fillna(-1.0).astype("float32"))
+    out["same_type_prev"] = (
+        (out["type_id"] == out["prev_type_id"]).astype("int8"))
     return out
 
 
@@ -102,3 +117,8 @@ def build_base_features(pitches: pd.DataFrame) -> pd.DataFrame:
 # attach_batter_profile at train time).
 BASE_FEATURE_COLS = _BASE_NUM_COLS + ["in_zone", "prev_type_id", "prev_in_zone",
                                       "n_prev_pitches", "same_hand"]
+
+#: Deception lags — opted into by the swing/whiff nodes only (NOT folded into
+#: BASE_FEATURE_COLS, so called_strike/contact nodes keep their trained specs
+#: and the xwOBA map stays valid without a contact_quality retrain).
+DECEPTION_FEATURE_COLS = ["prev_velo_diff", "prev_loc_dist", "same_type_prev"]
