@@ -1,7 +1,19 @@
 # ContextSwitcher — Pick up where this session left off
 
-**Last updated**: 2026-06-11 (late) — **STEP 3 (deception retrain) EXECUTED;
-RE-GATE IN FLIGHT** (`/tmp/backtest_deception.log`, n=2400 @1500,
+**Last updated**: 2026-06-11 (night) — **CAMPAIGN CLOSED: paired Δ(V2−lookup)
+= +0.0011 [−0.0050, +0.0070] at n=2400 — dead-center statistical tie.**
+Progression of the paired gap across the approved fixes: +0.0046 (base) →
++0.0027 (v1c.1 spin axis + 2024H1 map) → **+0.0011** (deception-aware
+cascade). BB 9.1 vs 8.7 PASS. K remains −2.2pp — exhaustively diagnosed:
+locations real-identical (proven), spin axis supplied, per-count calibration
+drift-rejected, deception features carry no signal on real pitches (AUC
+flat) though the deception-aware cascade still improved the gate by ~0.0016.
+Remaining K suspects (future work): count-constant foul model at 2 strikes;
+deeper cascade features. **Fuel candidate ARCHIVED:
+checkpoints_modal/releases/tiny-v1c1-sax-cal-20260611.pt** (+ volume).
+RECOMMENDATION: ship as fuel, unblock App A; K −2.2pp documented limitation.
+
+**(2026-06-11 late)** — STEP 3 (deception retrain) EXECUTED; re-gate ran (`/tmp/backtest_deception.log`, n=2400 @1500,
 v1c1-sax + deception-aware cascade, fresh lookup anchor). Retrain result:
 swing/whiff AUC FLAT (0.869→0.868 / 0.787→0.787); real-pitch K shortfall
 0.0070→0.0068 (~nothing). The features now exist in the rollout path
