@@ -1,6 +1,24 @@
 # ContextSwitcher — Pick up where this session left off
 
-**Last updated**: 2026-06-11 — **v1c.1 GATE RUN DONE: closest yet.** n=2400
+**Last updated**: 2026-06-11 (PM) — **WHIFF SEQUENCE: steps 1+2 DONE, step 3
+(deception retrain) NEXT.** Step 1 (isolation, `diagnose_whiff_isolation.py`
+— CAUTION: build_base_features RE-SORTS; labels/counts must come from X, the
+in-script assert guards this): cascade per-count calibration on real pitches
+is EXCELLENT (1-2pp everywhere); K-ending pitch rate @2 strikes = 0.1774
+pred vs 0.1844 real → −0.7pp/pitch ≈ 0.9pp of the 2.2pp K deficit is
+cascade-side under-whiff; rest is sim dynamics. Step 2 (per-count logit
+shifts, fit 2024H1): **MEASURED NEGATIVE on held-out Aug-Sep** (shortfall
++0.0070→+0.0103 — within-season drift; same lesson as the v8 in_zone fix);
+json REMOVED, fit script + HitterModel application kept (no-op when file
+absent). **STEP 3 SPEC (user-approved): retrain the whiff (and swing) node
+with DECEPTION features** — velo differential vs prev pitch, location
+differential, same-type-as-prev — features the sequence-aware pitch model
+can supply at rollout (prev velo/plate_x/z need plumbing through
+build_step_features/g_compute_v2 prev arrays). Then re-gate n=2400 @1500.
+Current best fuel: **tiny-v1c1-sax** (paired Δ vs lookup +0.0027
+[−0.0033,+0.0085], BB pass, K −2.2pp).
+
+**(2026-06-11 AM)** — **v1c.1 GATE RUN DONE: closest yet.** n=2400
 @1500 paths, NEW 2024H1 map (fresh same-sample lookup anchor 1.4593):
 baseline 1.4719 / lookup 1.4593 / **v1c.1 1.4620**. Paired Δ(v1c.1−lookup)
 = **+0.0027, 95% CI [−0.0033, +0.0085]** — tie, CI nearly centered on zero
