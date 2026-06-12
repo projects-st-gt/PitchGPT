@@ -1,6 +1,24 @@
 # ContextSwitcher — Pick up where this session left off
 
-**Last updated**: 2026-06-12 (PM) — **FIRST REAL PREDICTION RUN ON V2 FUEL
+**Last updated**: 2026-06-12 (afternoon) — **DATA REFRESH DONE + SLATE
+RE-RUN IN FLIGHT; MAJOR FINDING: long-window profile identity rates are
+FROZEN.** Refresh: raw+meta+augmented now through 2026-06-11 (was 2026-05-08
+— 5 weeks stale); fold-0 profiles rebuilt (~3.5h; NOTE builder has no
+incremental mode + tqdm silent when not a tty — both future fixes); upload +
+slate re-run on fresh profiles in flight (`/tmp/cards_20260612_v2.log`).
+**FINDING (user's Ruiz question exposed it):** in the profile cache,
+`recent_14d_*` features update per asof date correctly (Ruiz 14d wOBA 0.362→
+0.4525 this week — current form IS visible), but `bb_pct`/`k_pct` (and
+likely other long-window identity rates) are FROZEN to 4 decimals across
+5 weeks for ALL players (Soto bb 0.1659 constant May 1→Jun 5; also
+recent_14d_n_pas values look pitch-counted not PA-counted — second smell).
+DO NOT inference-patch: if training saw the same frozen behavior, the model
+learned around it; fixing one side creates train/serve skew (the in_zone
+lesson). INVESTIGATE in data/profile_cache.py: how bb_pct is computed vs
+recent_14d (per-asof vs fit-time). If it's a builder bug, the fix implies
+profile rebuild + possibly retrain + re-gate.
+
+**(2026-06-12 noon)** — **FIRST REAL PREDICTION RUN ON V2 FUEL
 DONE: 2026-06-12 slate, 15 games / 388 rows / 5,031 cells in 28.5 min**
 (Modal T4 ×10, n_paths=500 fractional). Registered under model label
 `tiny-v1c1-sax+cascade` (hash 85dc4fcb). Sanity: OPS min 0.516 / median
