@@ -1,6 +1,21 @@
 # ContextSwitcher — Pick up where this session left off
 
-**Last updated**: 2026-06-11 (night) — **CAMPAIGN CLOSED: paired Δ(V2−lookup)
+**Last updated**: 2026-06-12 — **V2 FUEL WIRED INTO PRODUCTION (commit
+`35b650f`).** `_compute_cell` dispatches on nuisance type (V2 →
+g_compute_v2 + fractional_inplay, VALIDATED: means identical, across-seed
+noise 3×↓, HR/2B split std 8-10×↓ @500 paths); `load_nuisance_auto`
+schema-detects; all card paths (card_remote/row_remote/run_matchup_cards/
+run_*_modal) now load `checkpoints/releases/tiny-v1c1-sax-cal-20260611.pt`,
+label `tiny-v1c1-sax+cascade`; backtest_remote intentionally keeps the v1
+harness. E2E smoke: real cell 500 paths in 9.5s, OPS 0.676, trust green,
+0 truncated. 21 card tests pass (v1 path unchanged). NEXT: run a real
+card date end-to-end (`run_rows_modal --date ... --n-paths 500`) → verify
+in the demo tab → then App A (full-game sim) per its existing spec.
+Future-work list (not blocking): foul model at 2 strikes, multiclass
+contact head, low-rank adaLN, K-stuff profile features, K=5 V2 folds
+before causal-language outputs.
+
+**(2026-06-11 night)** — **CAMPAIGN CLOSED: paired Δ(V2−lookup)
 = +0.0011 [−0.0050, +0.0070] at n=2400 — dead-center statistical tie.**
 Progression of the paired gap across the approved fixes: +0.0046 (base) →
 +0.0027 (v1c.1 spin axis + 2024H1 map) → **+0.0011** (deception-aware
