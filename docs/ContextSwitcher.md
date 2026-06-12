@@ -1,7 +1,17 @@
 # ContextSwitcher — Pick up where this session left off
 
-**Last updated**: 2026-06-12 — **V2 FUEL WIRED INTO PRODUCTION (commit
-`35b650f`).** `_compute_cell` dispatches on nuisance type (V2 →
+**Last updated**: 2026-06-12 (PM) — **FIRST REAL PREDICTION RUN ON V2 FUEL
+DONE: 2026-06-12 slate, 15 games / 388 rows / 5,031 cells in 28.5 min**
+(Modal T4 ×10, n_paths=500 fractional). Registered under model label
+`tiny-v1c1-sax+cascade` (hash 85dc4fcb). Sanity: OPS min 0.516 / median
+0.759 / max 1.127 — discriminating, centered near league; trust gauge all
+green; 0 errors. NEXT: (a) `python -m scripts.mcsim.fetch_actuals --date
+2026-06-12` TOMORROW (2026-06-13) for the overlay; (b) verify cards render
+in the demo MCSim tab (`make demo`); (c) App A build per its spec (per-PA
+fuel now trusted + precomputed cards are its input). Speed lever if wanted:
+row_remote max_containers (currently account-capped at 10).
+
+**(2026-06-12 AM)** — **V2 FUEL WIRED INTO PRODUCTION (commit `35b650f`).** `_compute_cell` dispatches on nuisance type (V2 →
 g_compute_v2 + fractional_inplay, VALIDATED: means identical, across-seed
 noise 3×↓, HR/2B split std 8-10×↓ @500 paths); `load_nuisance_auto`
 schema-detects; all card paths (card_remote/row_remote/run_matchup_cards/
