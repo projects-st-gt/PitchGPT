@@ -291,6 +291,25 @@ class NuisanceModelsV2:
         )
 
 
+def load_nuisance_auto(ckpt_path, **kwargs):
+    """Load the right nuisance wrapper for a checkpoint, by schema.
+
+    V2 checkpoints (schema_version >= 2, written by scripts.train_v2) get
+    :class:`NuisanceModelsV2`; everything else falls back to the V1
+    ``causal.nuisance.NuisanceModels``. Keyword args are forwarded; V1-only /
+    V2-only kwargs are filtered to the matching constructor.
+    """
+    import torch as _torch
+    ckpt = _torch.load(Path(ckpt_path), map_location="cpu", weights_only=False)
+    if int(ckpt.get("schema_version", 1)) >= 2:
+        allowed = {"device", "profiles_dir", "standardize_profiles",
+                   "apply_temperatures"}
+        return NuisanceModelsV2(
+            Path(ckpt_path), **{k: v for k, v in kwargs.items() if k in allowed})
+    from causal.nuisance import NuisanceModels
+    return NuisanceModels(Path(ckpt_path), **kwargs)
+
+
 # ---------- helpers for building a single-AB rollout batch ----------
 
 

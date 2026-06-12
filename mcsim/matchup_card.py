@@ -155,7 +155,23 @@ def _compute_cell(
             ballpark_id=ballpark_id, umpire_id=umpire_id, catcher_id=catcher_id)
         g_kwargs["outcome_model"] = "hitter"
         g_kwargs["hitter_step_fn"] = step_fn
-    r = g_compute(nuisance, ab, **g_kwargs)
+
+    # Engine dispatch on the nuisance type: V2 (v1c.1 fuel — adaLN + GMM)
+    # rolls out via g_compute_v2 with the same cascade step_fn and the
+    # variance-reduced fractional in-play credit; payload assembly below is
+    # shared. V1 checkpoints keep the original path byte-for-byte.
+    from causal.nuisance_v2 import NuisanceModelsV2
+    if isinstance(nuisance, NuisanceModelsV2):
+        if outcome_model != "hitter":
+            raise ValueError(
+                "V2 fuel requires outcome_model='hitter' (no result head)")
+        from causal.g_computation_v2 import g_compute_v2
+        r = g_compute_v2(
+            nuisance, ab, intervention_position=0, intervention_type=None,
+            n_paths=n_paths, rng_seed=rng_seed, hitter_step_fn=step_fn,
+            fractional_inplay=True)
+    else:
+        r = g_compute(nuisance, ab, **g_kwargs)
 
     # RV distribution from the per-path values (truncated paths are NaN).
     finite = r.run_value[np.isfinite(r.run_value)]

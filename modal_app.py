@@ -328,7 +328,7 @@ def card_remote(task: dict) -> dict:
     import os
     from pathlib import Path
     import torch
-    from causal.nuisance import NuisanceModels
+    from causal.nuisance_v2 import load_nuisance_auto
     from mcsim.matchup_card import compute_matchup_card
     from mcsim.mlb_api import get_active_roster
     from hitter.rollout import load_hitter_ctx
@@ -337,8 +337,8 @@ def card_remote(task: dict) -> dict:
     # NuisanceModels' own ProfileCache) resolves to /data/profiles when cwd="/".
     os.chdir("/")
     dev = "cuda" if torch.cuda.is_available() else "cpu"
-    nz = NuisanceModels(
-        Path("/data/checkpoints/small-fold0-v8/checkpoint_calibrated.pt"), device=dev)
+    nz = load_nuisance_auto(
+        Path("/data/checkpoints/releases/tiny-v1c1-sax-cal-20260611.pt"), device=dev)
     ctx = load_hitter_ctx("/data/checkpoints/hitter", profiles_dir="/data/profiles")
 
     date = task["date"]
@@ -369,14 +369,14 @@ def bench_cell(n_paths: int = 500, n_cells: int = 3) -> dict:
     os.chdir("/")
     from pathlib import Path
     import torch
-    from causal.nuisance import NuisanceModels
+    from causal.nuisance_v2 import load_nuisance_auto
     from mcsim.matchup_card import compute_matchup_card, PitcherSpec, BatterSpec
     from hitter.rollout import load_hitter_ctx
 
     dev = "cuda" if torch.cuda.is_available() else "cpu"
     t = time.time()
-    nz = NuisanceModels(
-        Path("/data/checkpoints/small-fold0-v8/checkpoint_calibrated.pt"), device=dev)
+    nz = load_nuisance_auto(
+        Path("/data/checkpoints/releases/tiny-v1c1-sax-cal-20260611.pt"), device=dev)
     ctx = load_hitter_ctx("/data/checkpoints/hitter", profiles_dir="/data/profiles")
     load_s = time.time() - t
     bats = [BatterSpec(id=b, name=str(b), stand="R")
@@ -537,7 +537,7 @@ def row_remote(task: dict) -> dict:
     global _ROW_NZ, _ROW_CTX
     from pathlib import Path
     import torch
-    from causal.nuisance import NuisanceModels
+    from causal.nuisance_v2 import load_nuisance_auto
     from causal.positivity import PositivityGate
     from mcsim.matchup_card import _compute_cell
     from mcsim.state import ReferenceContext
@@ -545,8 +545,8 @@ def row_remote(task: dict) -> dict:
 
     if _ROW_NZ is None:                       # load once per warm container
         dev = "cuda" if torch.cuda.is_available() else "cpu"
-        _ROW_NZ = NuisanceModels(
-            Path("/data/checkpoints/small-fold0-v8/checkpoint_calibrated.pt"), device=dev)
+        _ROW_NZ = load_nuisance_auto(
+            Path("/data/checkpoints/releases/tiny-v1c1-sax-cal-20260611.pt"), device=dev)
         _ROW_CTX = load_hitter_ctx("/data/checkpoints/hitter", profiles_dir="/data/profiles")
 
     pitcher = task["pitcher"]; gate = PositivityGate(); context = ReferenceContext()

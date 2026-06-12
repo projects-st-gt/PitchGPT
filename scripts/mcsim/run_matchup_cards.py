@@ -21,7 +21,7 @@ import torch
 
 torch.backends.mps.is_available = lambda: False  # pre-existing AB-outcome MPS bug
 
-from causal.nuisance import NuisanceModels
+from causal.nuisance_v2 import load_nuisance_auto
 from mcsim.matchup_card import compute_matchup_card
 from mcsim.mlb_api import get_active_roster, get_schedule
 from mcsim.storage import (
@@ -31,7 +31,7 @@ from mcsim.storage import (
     write_prediction,
 )
 
-DEFAULT_CKPT = Path("checkpoints_modal/small-fold0-v7/checkpoint_calibrated.pt")
+DEFAULT_CKPT = Path("checkpoints_modal/releases/tiny-v1c1-sax-cal-20260611.pt")
 
 
 def compute_ckpt_hash(ckpt_path: Path, *, n_chars: int = 16) -> str:
@@ -90,7 +90,7 @@ def _init_worker(ckpt_path_str: str, outcome_model: str = "head",
 
     _torch.set_num_threads(1)
     global _WORKER_NUISANCE, _WORKER_HITTER_CTX, _WORKER_OUTCOME_MODEL
-    _WORKER_NUISANCE = NuisanceModels(Path(ckpt_path_str), device="cpu")
+    _WORKER_NUISANCE = load_nuisance_auto(Path(ckpt_path_str), device="cpu")
     _WORKER_OUTCOME_MODEL = outcome_model
     if outcome_model == "hitter":
         from hitter.rollout import load_hitter_ctx
@@ -218,7 +218,7 @@ def main() -> None:
     conn = init_db(args.db_path)
     register_model_version(conn, ckpt_hash=ckpt_hash, label=args.ckpt.parent.name)
     # In parallel mode each worker loads its own model — don't load one here.
-    nuisance = None if args.n_workers > 1 else NuisanceModels(args.ckpt, device="cpu")
+    nuisance = None if args.n_workers > 1 else load_nuisance_auto(args.ckpt, device="cpu")
     print(f"ckpt={args.ckpt}  hash={ckpt_hash}  n_paths={args.n_paths}  "
           f"workers={args.n_workers}  db={args.db_path}")
 
