@@ -1,8 +1,16 @@
 # ContextSwitcher — Pick up where this session left off
 
-**Last updated**: 2026-06-12 (afternoon) — **DATA REFRESH DONE + SLATE
-RE-RUN IN FLIGHT; MAJOR FINDING: long-window profile identity rates are
-FROZEN.** Refresh: raw+meta+augmented now through 2026-06-11 (was 2026-05-08
+**Last updated**: 2026-06-12 (afternoon) — **REFRESHED SLATE LIVE (389 rows
+/ 5,044 cells on June-11-fresh profiles; DB upserts replaced the stale-run
+rows).** Named before/after (stale May-8 vs fresh profiles): Ruiz–Ashcraft
+BB 2.0%→4.4% (recent-form channel carried his walk surge), K 30%→28%, OPS
+0.564→0.602; Soto–Strider OPS 1.053→1.044 (slightly cooler recent form).
+Slate median OPS 0.759→0.763. The tomorrow-9AM actuals scorecard will grade
+the FRESH run (the DB now holds only it). Frozen-identity-rate finding
+below still stands as the open investigation.
+
+**(2026-06-12 early afternoon)** — DATA REFRESH + **MAJOR FINDING:
+long-window profile identity rates are FROZEN.** Refresh: raw+meta+augmented now through 2026-06-11 (was 2026-05-08
 — 5 weeks stale); fold-0 profiles rebuilt (~3.5h; NOTE builder has no
 incremental mode + tqdm silent when not a tty — both future fixes); upload +
 slate re-run on fresh profiles in flight (`/tmp/cards_20260612_v2.log`).
