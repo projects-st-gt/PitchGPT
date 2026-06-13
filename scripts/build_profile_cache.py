@@ -181,8 +181,16 @@ def _composite_sort_key(
     of 1 or 2). This lets us use ``np.searchsorted`` for fast asof cutoff
     instead of a full boolean filter per key.
     """
-    # Convert datetime-like to int64 nanoseconds since epoch, then floor to days.
-    date_ord = pd.to_datetime(dates).astype("int64").to_numpy() // _NS_PER_DAY
+    # Convert datetime-like to int64 nanoseconds since epoch, then floor to
+    # days. CRITICAL: force ns resolution first — mixed parquet sources can
+    # carry datetime64[ms] (newer pyarrow default), and ms-as-ns collapses
+    # every date to ~day 20, which silently degenerates every asof cutoff to
+    # "include everything" (frozen profiles + temporal leakage; found
+    # 2026-06-12 via the frozen-bb_pct investigation).
+    date_ord = (
+        pd.to_datetime(dates).as_unit("ns").astype("int64").to_numpy()
+        // _NS_PER_DAY
+    )
     return date_ord * 100 + nums.astype("int64")
 
 

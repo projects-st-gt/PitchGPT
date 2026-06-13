@@ -152,3 +152,20 @@ def test_fold_assignments_games_in_and_excluding_fold():
 def test_fold_assignments_validates_columns():
     with pytest.raises(KeyError):
         FoldAssignments(pd.DataFrame({"foo": [1]}))
+
+
+def test_composite_keys_unit_safe():
+    """Regression: 2026-06-12 unit bug. pandas 3.x parses date strings to
+    datetime64[us]; us-as-ns collapsed every sort key to ~day 20, degenerating
+    every asof cutoff to 'include everything' (frozen profiles + temporal
+    leakage). The sort key and asof key must agree for any datetime unit."""
+    import numpy as np
+    import pandas as pd
+    from scripts.build_profile_cache import _composite_asof_key, _composite_sort_key
+
+    dates_us = pd.to_datetime(["2026-05-08", "2026-06-10"]).as_unit("us").to_numpy()
+    nums = np.array([1, 1])
+    keys = _composite_sort_key(dates_us, nums)
+    ak = _composite_asof_key(pd.Timestamp("2026-06-01"), 1)
+    assert keys[0] < ak < keys[1], (
+        f"asof key {ak} must separate {keys} — unit mismatch regression")
