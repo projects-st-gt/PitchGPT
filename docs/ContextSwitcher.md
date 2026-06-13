@@ -1,6 +1,27 @@
 # ContextSwitcher — Pick up where this session left off
 
-**Last updated**: 2026-06-12 (afternoon) — **REFRESHED SLATE LIVE (389 rows
+**Last updated**: 2026-06-12 (night) — **CRITICAL BUG FOUND + FIXED: profile
+asof cutoffs were DEGENERATE (pandas-3 us-vs-ns unit bug in
+`_composite_sort_key`).** Every fast-path batter cache built since ~May 9
+(incl. the May-18 cache used for ALL V2 training + gates) gave EVERY asof
+key the player's FULL history → frozen identity rates AND temporal leakage
+(future data in historical profiles — silent hard-rule-2 violation in the
+batter-profile features). Fix committed + regression test
+(tests/test_folds.py::test_composite_keys_unit_safe); CLEAN fold-0 rebuild
++ volume upload running overnight (`/tmp/profile_rebuild_clean.log`).
+**NEXT SESSION — REQUIRED AUDIT (before trusting any prior absolute
+numbers):** (1) verify pitcher cache (slow before_asof path — may be clean);
+(2) grep the codebase for other `.astype("int64")`-on-datetime sites
+(player_profiles.before_asof, datasets, backtest loaders); (3) with CLEAN
+profiles: re-run teacher-forced eval + the n=2400 gate — model-vs-lookup
+was apples-to-apples leaky (both consumed the same profiles) so RELATIVE
+findings likely stand, but all ABSOLUTE numbers are provisional until
+re-certified; retrain v1c.1 on clean profiles if eval shifts materially.
+**Tonight's slate predictions REMAIN VALID** (latest-asof = full-history
+window is correct for "now") and tomorrow's 9AM actuals scorecard is a
+genuinely pre-registered out-of-sample test.
+
+**(2026-06-12 afternoon)** — **REFRESHED SLATE LIVE (389 rows
 / 5,044 cells on June-11-fresh profiles; DB upserts replaced the stale-run
 rows).** Named before/after (stale May-8 vs fresh profiles): Ruiz–Ashcraft
 BB 2.0%→4.4% (recent-form channel carried his walk surge), K 30%→28%, OPS
