@@ -102,6 +102,83 @@ def set_lr(optim: torch.optim.Optimizer, lr: float) -> None:
 
 
 # ============================================================
+# Noise injection (v9 — rollout-drift fix)
+# ============================================================
+
+
+def build_empirical_type_dist(pitches: pd.DataFrame) -> dict[int, np.ndarray]:
+    """Per-count-state empirical type distribution from training data.
+
+    Returns {count_state_id -> float32[n_pitch_types]} normalized probabilities.
+    Used by noise injection to sample plausible replacement types at each count.
+    """
+    from data.dataset import PITCH_TYPES, N_PITCH_TYPES
+    counts = np.zeros((12, N_PITCH_TYPES), dtype=np.float64)
+    for cs, grp in pitches.groupby("count_state"):
+        cs = int(cs)
+        if not (0 <= cs <= 11):
+            continue
+        vc = grp["type_id"].value_counts()
+        for tid, cnt in vc.items():
+            tid = int(tid)
+            if 1 <= tid <= N_PITCH_TYPES:
+                counts[cs, tid - 1] += int(cnt)
+    result = {}
+    for cs in range(12):
+        s = counts[cs].sum()
+        if s > 0:
+            result[cs] = (counts[cs] / s).astype(np.float32)
+        else:
+            result[cs] = np.ones(N_PITCH_TYPES, dtype=np.float32) / N_PITCH_TYPES
+    return result
+
+
+def perturb_input_tokens(
+    pitch_factors: dict[str, torch.Tensor],
+    padding_mask: torch.Tensor,
+    p_corrupt: float,
+    empirical_type_dist: dict[int, np.ndarray],
+    rng: np.random.Generator,
+) -> dict[str, torch.Tensor]:
+    """Replace a fraction of input type tokens with count-conditional empirical samples.
+
+    Modifies pitch_factors in-place. For each real (non-padded) position, with
+    probability p_corrupt, replaces the type token with a sample drawn from the
+    empirical type distribution at that position's count state. Zone is left alone
+    (the MDN handles location from the sampled type).
+
+    This teaches the model to predict correctly even when the previous pitch in
+    the sequence is "wrong" — exactly the condition it faces during rollout,
+    where it reads its own generated (imperfect) pitches.
+
+    Based on Sanchez-Gonzalez et al. ICML 2020 (noise injection for learned
+    physics simulators) and Brandstetter et al. ICLR 2022 (pushforward trick).
+    """
+    B, T = padding_mask.shape
+    type_t = pitch_factors["type"]    # (B, T) LongTensor, 1-indexed
+    count_t = pitch_factors["count"]  # (B, T) LongTensor, 0..11
+
+    coin = torch.from_numpy(rng.random((B, T)).astype(np.float32))
+    corrupt_mask = (coin < p_corrupt) & padding_mask.cpu()
+
+    if not corrupt_mask.any():
+        return pitch_factors
+
+    for b in range(B):
+        for t in range(T):
+            if not corrupt_mask[b, t]:
+                continue
+            cs = int(count_t[b, t].item())
+            if cs not in empirical_type_dist:
+                continue
+            td = empirical_type_dist[cs]
+            sampled_type = int(rng.choice(len(td), p=td)) + 1  # +1 for 1-indexed type_id
+            type_t[b, t] = sampled_type
+
+    return pitch_factors
+
+
+# ============================================================
 # Loss computation
 # ============================================================
 
@@ -113,12 +190,19 @@ def compute_losses(
     *,
     n_context_tokens: int,
     zone_centers: Optional[torch.Tensor] = None,
+    train_first_pitch: bool = False,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """Sum of per-head cross-entropies, weighted by cfg.head_weights.
 
     Returns the scalar joint loss plus a dict of detached per-head losses for
     logging. The propensity logits are sliced to drop context-token positions
     before matching to targets.
+
+    When ``train_first_pitch`` is True, position NC-1 (the last context-token
+    position) is included in the type and zone losses with the first pitch's
+    factor as the target. This trains the model to predict the first pitch
+    type/zone from context alone — the position the rollout reads from for
+    pitch 0. (v9 fix for the untrained-NC-1 bug.)
 
     When ``cfg.zone_spatial_weight > 0`` and ``zone_centers`` is provided,
     an auxiliary EMD-style loss is added on the zone head: the squared
@@ -127,8 +211,22 @@ def compute_losses(
     w = cfg.head_weights
 
     # Propensity heads — drop context positions to align with per-pitch targets.
-    type_logits = out["propensity"]["type"][:, n_context_tokens:, :]
-    zone_logits = out["propensity"]["zone"][:, n_context_tokens:, :]
+    # v9: optionally include position NC-1 for type/zone so the model learns to
+    # predict the first pitch from context alone.
+    if train_first_pitch:
+        type_logits = out["propensity"]["type"][:, n_context_tokens - 1:, :]
+        zone_logits = out["propensity"]["zone"][:, n_context_tokens - 1:, :]
+        # Prepend the first pitch's type/zone as targets for position NC-1.
+        # pitch_factors["type"][:, 0] is the first pitch's type_id (1..7).
+        first_type = batch["pitch_factors"]["type"][:, 0:1]
+        first_zone = batch["pitch_factors"]["zone"][:, 0:1]
+        type_targets = torch.cat([first_type, batch["targets"]["propensity"]["type"]], dim=1)
+        zone_targets = torch.cat([first_zone, batch["targets"]["propensity"]["zone"]], dim=1)
+    else:
+        type_logits = out["propensity"]["type"][:, n_context_tokens:, :]
+        zone_logits = out["propensity"]["zone"][:, n_context_tokens:, :]
+        type_targets = batch["targets"]["propensity"]["type"]
+        zone_targets = batch["targets"]["propensity"]["zone"]
     velo_logits = out["propensity"]["velo"][:, n_context_tokens:, :]
     spin_rate_logits = out["propensity"]["spin_rate"][:, n_context_tokens:, :]
 
@@ -138,7 +236,7 @@ def compute_losses(
         # toward one dominant pitch type (FF). Per Lin et al 2017 "Focal Loss".
         # Class weights (1/freq^class_weight_alpha) added if class_weight_alpha > 0.
         type_logits_flat = type_logits.reshape(-1, cfg.n_pitch_types)
-        type_target_flat = batch["targets"]["propensity"]["type"].reshape(-1)
+        type_target_flat = type_targets.reshape(-1)
         valid_mask = type_target_flat != -100
         if valid_mask.any():
             logits_v = type_logits_flat[valid_mask]
@@ -162,20 +260,20 @@ def compute_losses(
     else:
         type_loss = F.cross_entropy(
             type_logits.reshape(-1, cfg.n_pitch_types),
-            batch["targets"]["propensity"]["type"].reshape(-1),
+            type_targets.reshape(-1),
             ignore_index=-100,
             label_smoothing=cfg.label_smoothing_type,
         )
     zone_loss = F.cross_entropy(
         zone_logits.reshape(-1, cfg.n_zones),
-        batch["targets"]["propensity"]["zone"].reshape(-1),
+        zone_targets.reshape(-1),
         ignore_index=-100,
     )
 
     # Auxiliary EMD-style spatial loss on the zone head (see config docstring).
     # Skipped if disabled (weight=0) OR if centroids weren't provided.
     if cfg.zone_spatial_weight > 0.0 and zone_centers is not None:
-        zone_target_flat = batch["targets"]["propensity"]["zone"].reshape(-1)
+        zone_target_flat = zone_targets.reshape(-1)
         zone_logits_flat = zone_logits.reshape(-1, cfg.n_zones)
         valid_z = zone_target_flat != -100
         if valid_z.any():
@@ -432,6 +530,9 @@ def train(
     ab_outcome_head: bool = True,  # ADR-014 — set False for v8 (drops the AB head)
     result_loss_weight: float | None = None,  # override head_weights["result"] (v8: 0.3)
     location_loss_weight: float = 1.0,  # weight for the MDN NLL in the total loss
+    train_first_pitch: bool = False,  # v9: train position NC-1 to predict first pitch type/zone
+    noise_p: float = 0.0,  # v9: input perturbation probability (0=off, 0.2=recommended)
+    noise_ramp_steps: int = 3000,  # v9: steps to ramp noise from 0 to noise_p
 ) -> dict:
     """Run a single training pass; return summary dict.
 
@@ -588,6 +689,22 @@ def train(
     amp_dtype = autocast_dtype(device)
     use_amp = amp_dtype != torch.float32 and device.type in ("cuda", "mps")
 
+    # --- v9: noise injection setup ---
+    noise_rng: Optional[np.random.Generator] = None
+    empirical_type_dist: Optional[dict] = None
+    if noise_p > 0:
+        noise_rng = np.random.default_rng(seed + 7)
+        empirical_type_dist = build_empirical_type_dist(train_pitches)
+        log_event({
+            "event": "noise_injection_enabled",
+            "noise_p": noise_p,
+            "noise_ramp_steps": noise_ramp_steps,
+        })
+        print(f"Noise injection ON: p={noise_p}, ramp={noise_ramp_steps} steps")
+    if train_first_pitch:
+        log_event({"event": "train_first_pitch_enabled"})
+        print("First-pitch training ON: position NC-1 included in type/zone loss")
+
     # --- Training loop ---
     step = 0
     t_train_start = time.time()
@@ -604,6 +721,18 @@ def train(
             if stop_signal:
                 break
             batch = move_batch_to_device(batch, device)
+
+            # v9: noise injection — perturb input type tokens before forward pass
+            if noise_p > 0 and noise_rng is not None and empirical_type_dist is not None:
+                current_p = min(noise_p, noise_p * step / max(noise_ramp_steps, 1))
+                if current_p > 0:
+                    perturb_input_tokens(
+                        batch["pitch_factors"],
+                        batch["padding_mask"],
+                        p_corrupt=current_p,
+                        empirical_type_dist=empirical_type_dist,
+                        rng=noise_rng,
+                    )
 
             lr = cosine_with_warmup(
                 step, warmup=warmup_steps, max_steps=total_steps,
@@ -627,6 +756,7 @@ def train(
                 loss, per_head = compute_losses(
                     out, batch, cfg, n_context_tokens=PitchGPT.N_CONTEXT_TOKENS,
                     zone_centers=zone_centers,
+                    train_first_pitch=train_first_pitch,
                 )
             optim.zero_grad(set_to_none=True)
             loss.backward()
@@ -786,6 +916,12 @@ def main() -> None:
                    help="override head_weights['result'] (v8: 0.3)")
     p.add_argument("--location-loss-weight", type=float, default=1.0,
                    help="weight for the MDN location NLL (default 1.0)")
+    p.add_argument("--train-first-pitch", action="store_true",
+                   help="v9: train position NC-1 to predict first pitch type/zone")
+    p.add_argument("--noise-p", type=float, default=0.0,
+                   help="v9: input perturbation probability (0=off, 0.2=recommended)")
+    p.add_argument("--noise-ramp-steps", type=int, default=3000,
+                   help="v9: steps to ramp noise from 0 to --noise-p")
     args = p.parse_args()
 
     train(
@@ -819,6 +955,9 @@ def main() -> None:
         ab_outcome_head=not args.no_ab_outcome_head,
         result_loss_weight=args.result_loss_weight,
         location_loss_weight=args.location_loss_weight,
+        train_first_pitch=args.train_first_pitch,
+        noise_p=args.noise_p,
+        noise_ramp_steps=args.noise_ramp_steps,
     )
 
 

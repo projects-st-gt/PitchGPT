@@ -9,7 +9,7 @@ PitchGPT's :class:`model.embeddings.FactorEmbeddings` and
 The pipeline has two stages:
 
 1. **Fit** (training-only). Walks every daily parquet whose ``game_date`` is
-   on/before ``TRAIN_END`` (2023-12-31, per CLAUDE.md temporal split) and
+   on/before ``TRAIN_END`` (2023-12-31, per the project temporal split) and
    computes:
 
    - spin-rate quantile edges (8 bins via training-data deciles)

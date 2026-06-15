@@ -174,8 +174,8 @@ app = FastAPI(
     title="PitchGPT counterfactual demo API",
     description=(
         "Wraps the causal layer (g-computation + positivity + sensitivity) "
-        "behind one HTTP endpoint. See CLAUDE.md for the project's hard rules; "
-        "in particular: refusal under positivity violation IS a feature."
+        "behind one HTTP endpoint. "
+        "Refusal under positivity violation IS a feature."
     ),
     version="0.1.0",
 )

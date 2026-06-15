@@ -203,7 +203,7 @@ def test_intervention_type_propensity_exposed_matches_sampled(setup):
         err_msg="exposed intervention_type_propensity != the distribution the "
                 "rollout sampled the intervention pitch from",
     )
-    # Named numerical output (per CLAUDE.md bug-prevention discipline): the
+    # Named numerical output: the
     # modal type and its π̂, which the trust gate consumes.
     modal = int(np.argmax(r.intervention_type_propensity))
     print(f"\nπ̂(modal type id {modal + 1}) = "

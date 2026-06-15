@@ -2,7 +2,7 @@
 the count-constant foul rate, and the xwOBA-on-contact target join.
 
 Pure-function tests are synthetic + fast. A real-data smoke test (slow) lives at
-the bottom behind a marker and prints named numerical outputs (per CLAUDE.md).
+the bottom behind a marker and prints named numerical outputs.
 """
 from __future__ import annotations
 
@@ -242,7 +242,7 @@ requires_train = pytest.mark.skipif(
 def test_build_training_frame_and_train_all_nodes_real_slice():
     """End-to-end pipeline on a small real slice: build the feature frame, train
     all 4 ML nodes + foul rates. Asserts structure + prints named per-node
-    numbers (CLAUDE.md discipline). Not the full train — a wiring check."""
+    numbers. Not the full train — a wiring check."""
     from data.profile_cache_loader import ProfileCache
     from hitter.train import (
         build_training_frame, train_all_nodes, load_pitch_frame,

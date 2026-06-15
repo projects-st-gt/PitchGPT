@@ -173,5 +173,5 @@ Replaces rows in the original "Brainstorm-added confounders" table:
 - `model/config.py` — add `n_inning_buckets=14`, `n_score_diff_buckets=11`, `n_inning_half=3`, `n_pitcher_fatigue_buckets=12`; remove `n_leverage_buckets`.
 - `model/embeddings.py` — `ContextTokens` swaps `leverage_emb` for `inning_emb + score_diff_emb + inning_half_emb`; `FactorEmbeddings` adds `pitcher_fatigue_emb`.
 - `data/preprocess_pitchgpt.py` (new) — derives all the above columns and writes augmented parquets.
-- `.claude/skills/pitchgpt-model/SKILL.md` — context-token list and factor-vocab table updated.
+- PitchGPT model skill — context-token list and factor-vocab table updated.
 - `tests/test_pitchgpt_model.py` — fixture dicts updated for new keys.

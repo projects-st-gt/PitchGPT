@@ -346,11 +346,22 @@ def card_remote(task: dict) -> dict:
         task["home_team_id"], date, probable_pitcher_id=task.get("home_probable_pitcher_id"))
     away_p, away_h = get_active_roster(
         task["away_team_id"], date, probable_pitcher_id=task.get("away_probable_pitcher_id"))
+    # Resolve venue_id → ballpark_id using the preprocessing vocabulary.
+    ballpark_id = 0
+    venue_id = task.get("venue_id")
+    if venue_id is not None:
+        import pandas as pd
+        bp_path = Path("/data/preprocess_artifacts/v2/ballpark_vocab.parquet")
+        if bp_path.exists():
+            bv = pd.read_parquet(bp_path)
+            bp_map = dict(zip(bv["raw_id"].astype(int), bv["vocab_id"].astype(int)))
+            ballpark_id = bp_map.get(int(venue_id), 1)  # UNK=1 for unseen
     card = compute_matchup_card(
         nz, game_pk=task["game_pk"], game_date=date,
         home_team=task["home_team"], away_team=task["away_team"],
         home_pitchers=home_p, away_pitchers=away_p,
         home_lineup=home_h, away_lineup=away_h,
+        ballpark_id=ballpark_id,
         n_paths=task.get("n_paths", 300), rng_seed=task.get("rng_seed", 1),
         outcome_model="hitter", hitter_ctx=ctx,
         progress_every=task.get("progress_every", 50))
@@ -549,12 +560,15 @@ def row_remote(task: dict) -> dict:
             Path("/data/checkpoints/releases/tiny-v1c1-sax-cal-20260611.pt"), device=dev)
         _ROW_CTX = load_hitter_ctx("/data/checkpoints/hitter", profiles_dir="/data/profiles")
 
-    pitcher = task["pitcher"]; gate = PositivityGate(); context = ReferenceContext()
+    from dataclasses import replace as _replace_dc
+    pitcher = task["pitcher"]; gate = PositivityGate()
+    context = ReferenceContext(inning_half=task.get("inning_half", "Top"))
+    bp_id = task.get("ballpark_id", 0)
     cells = []
     for i, batter in enumerate(task["lineup"]):
         cells.append(_compute_cell(
             _ROW_NZ, pitcher=pitcher, batter=batter, game_date=task["date"],
-            game_pk=task["game_pk"], ballpark_id=0, umpire_id=0, catcher_id=0,
+            game_pk=task["game_pk"], ballpark_id=bp_id, umpire_id=0, catcher_id=0,
             n_paths=task["n_paths"], rng_seed=task["rng_seed"] + i, context=context,
             gate=gate, outcome_model="hitter", hitter_ctx=_ROW_CTX))
     row = {"pitcher_id": pitcher.id, "name": pitcher.name, "team": task["team"],

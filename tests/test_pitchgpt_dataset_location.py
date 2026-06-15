@@ -187,7 +187,7 @@ def test_dataset_emits_location_target(tmp_path):
         f"got {loc[0, 1].item():.4f}"
     )
 
-    # Named numerical output (per CLAUDE.md discipline)
+    # Named numerical output
     print(f"location target[0] = ({loc[0, 0].item():.3f}, {loc[0, 1].item():.3f})")
     print(f"location target[-1] = ({loc[-1, 0].item()}, {loc[-1, 1].item()})  [NaN expected]")
 

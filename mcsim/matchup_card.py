@@ -37,6 +37,7 @@ from causal.g_computation import AB_OUTCOME_NAMES, g_compute
 from causal.nuisance import NuisanceModels
 from causal.positivity import PositivityGate
 from data.dataset import PITCH_TYPES
+from dataclasses import replace as _replace_dc
 from mcsim.state import ReferenceContext, build_synthetic_ab
 
 
@@ -48,12 +49,15 @@ from mcsim.state import ReferenceContext, build_synthetic_ab
 @dataclass
 class PitcherSpec:
     """One arm on a staff. ``throws`` is "R"/"L"; ``is_starter`` flags the
-    probable starter (vs. a bullpen arm) for the payload + UI ordering."""
+    probable starter (vs. a bullpen arm) for the payload + UI ordering.
+    ``is_rotation`` marks other rotation members who are NOT available for
+    bullpen duty (e.g. they started within the last 5 days)."""
 
     id: int
     name: str
     throws: str
     is_starter: bool = False
+    is_rotation: bool = False
 
 
 @dataclass
@@ -149,10 +153,12 @@ def _compute_cell(
     if outcome_model == "hitter":
         # pitchGPT picks pitches; the hitter cascade decides outcomes.
         from hitter.rollout import build_cell_step_fn
+        from mcsim.state import _inning_half_id
         step_fn = build_cell_step_fn(
             hitter_ctx, pitcher_id=pitcher.id, batter_id=batter.id,
             stand=batter.stand, throws=pitcher.throws, game_date=game_date,
-            ballpark_id=ballpark_id, umpire_id=umpire_id, catcher_id=catcher_id)
+            ballpark_id=ballpark_id, umpire_id=umpire_id, catcher_id=catcher_id,
+            inning_half=_inning_half_id(context.inning_half))
         g_kwargs["outcome_model"] = "hitter"
         g_kwargs["hitter_step_fn"] = step_fn
 
@@ -199,6 +205,7 @@ def _compute_cell(
     return {
         "batter_id": batter.id,
         "batter_name": batter.name,
+        "stand": batter.stand,
         "predicted_rv_median": p50,
         "predicted_rv_p05": p05,
         "predicted_rv_p95": p95,
@@ -268,12 +275,15 @@ def compute_matchup_card(
     )
     _t0 = time.perf_counter()
 
-    # (team, pitchers, opposing_lineup, their own catcher) for each half of the grid.
+    # (team, pitchers, opposing_lineup, their own catcher, inning_half) per grid half.
+    # Home pitchers face the away lineup (Top = away batting);
+    # away pitchers face the home lineup (Bot = home batting).
     half_grids = [
-        (home_team, home_pitchers, away_lineup, catcher_home_id),
-        (away_team, away_pitchers, home_lineup, catcher_away_id),
+        (home_team, home_pitchers, away_lineup, catcher_home_id, "Top"),
+        (away_team, away_pitchers, home_lineup, catcher_away_id, "Bot"),
     ]
-    for team, pitchers, lineup, catcher_id in half_grids:
+    for team, pitchers, lineup, catcher_id, inning_half in half_grids:
+        half_ctx = _replace_dc(context, inning_half=inning_half)
         for pitcher in pitchers:
             cells = []
             for batter in lineup:
@@ -290,7 +300,7 @@ def compute_matchup_card(
                         catcher_id=catcher_id,
                         n_paths=n_paths,
                         rng_seed=seed,
-                        context=context,
+                        context=half_ctx,
                         gate=gate,
                         outcome_model=outcome_model,
                         hitter_ctx=hitter_ctx,
@@ -306,14 +316,17 @@ def compute_matchup_card(
                         f"({elapsed:.0f}s elapsed, ~{eta:.0f}s left)",
                         flush=True,
                     )
-            rows.append({
+            row_dict = {
                 "pitcher_id": pitcher.id,
                 "name": pitcher.name,
                 "team": team,
                 "throws": pitcher.throws,
                 "is_starter": pitcher.is_starter,
                 "cells": cells,
-            })
+            }
+            if pitcher.is_rotation:
+                row_dict["is_rotation"] = True
+            rows.append(row_dict)
 
     def _starter(pitchers: list[PitcherSpec]) -> Optional[dict]:
         for p in pitchers:
@@ -331,6 +344,7 @@ def compute_matchup_card(
         "rows": rows,
         "n_cells": cell_index,
         "n_paths_per_cell": n_paths,
+        "ballpark_id": ballpark_id,
         "reference_context": {
             "count": f"{context.count_balls}-{context.count_strikes}",
             "runners": "empty" if not (

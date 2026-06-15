@@ -12,10 +12,10 @@ export default {
           "Roboto",
           "sans-serif",
         ],
-        // Inter only — SF Pro is a license violation on the web per CLAUDE.md.
+        // Inter only — SF Pro is a license violation on the web.
       },
       colors: {
-        // Three semantic colors only, per the locked design (CLAUDE.md):
+        // Three semantic colors only, per the locked design:
         // accent = teal-600, warn = amber, refuse = red.
         accent: {
           DEFAULT: "#0d9488", // teal-600
@@ -24,7 +24,7 @@ export default {
         },
       },
       fontSize: {
-        // Three scales only (CLAUDE.md): 14 / 16 / 22 / 32
+        // Three scales only: 14 / 16 / 22 / 32
         body: ["16px", { lineHeight: "1.5" }],
         small: ["14px", { lineHeight: "1.5" }],
         h2: ["22px", { lineHeight: "1.35", letterSpacing: "-0.01em" }],

@@ -8,7 +8,7 @@ Integration-style: uses the real v7 checkpoint and real player IDs from the
 val set so the profile-cache lookup exercises the full path. Kept small
 (2 pitchers × 2 batters per half-grid, n_paths=50) so it stays CI-fast.
 
-Per CLAUDE.md bug-prevention discipline, the headline test prints a NAMED
+The headline test prints a NAMED
 numerical output — a real cell's predicted median RV and π̂(modal type) — so
 a convention slip surfaces immediately.
 """
@@ -168,7 +168,7 @@ def test_reproducible_with_seed(setup):
 
 
 # ============================================================
-# Named numerical output (CLAUDE.md discipline)
+# Named numerical output
 # ============================================================
 
 

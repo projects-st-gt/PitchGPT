@@ -60,7 +60,7 @@ def test_predict_node_reproduces_train_time(saved_dir):
         got = hm.predict_node(node, Xtest)
         want = bundle["nodes"][node]["predict"](Xtest)
         np.testing.assert_allclose(got, want, rtol=1e-5, atol=1e-6)
-    # a named numerical check (CLAUDE.md): P(swing) on a high-x1 row is high
+    # a named numerical check: P(swing) on a high-x1 row is high
     hi = pd.DataFrame({"x1": [3.0], "x2": [0.0]})
     p = float(hm.predict_node("swing", hi)[0])
     print(f"\nP(swing | x1=3) = {p:.3f}")

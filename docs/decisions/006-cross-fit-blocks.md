@@ -12,7 +12,7 @@ Two questions follow: what's the *unit* of splitting (individual pitches? at-bat
 ## Why this matters
 
 - **Wrong unit = leakage.** If two pitches from the same game land in different folds, the catcher's read of the batter (built up across the game) is leaking from training to evaluation. Same for fatigue accumulating within a start, or any in-game adjustment.
-- **No cross-fitting at all** = AIPW estimates are asymptotically biased. Most "deep counterfactual" papers skip this. One of the things we explicitly committed to *not* doing in CLAUDE.md.
+- **No cross-fitting at all** = AIPW estimates are asymptotically biased. Most "deep counterfactual" papers skip this. One of the things we explicitly committed to *not* doing in this project.
 
 ## Options for the splitting unit
 

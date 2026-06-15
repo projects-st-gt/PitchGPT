@@ -3,6 +3,7 @@ import { getABContext, listAtBats, listGames, postQuery } from "./api";
 import MCSimTab from "./MCSimTab";
 import PitcherProfileTab from "./PitcherProfileTab";
 import RolloutViewerTab from "./RolloutViewerTab";
+import ScorePredictionTab from "./ScorePredictionTab";
 import { ScoreboardHeader } from "./Scoreboard";
 import { Caption, PitchBadge, Section, SectionLabel } from "./shared/ui";
 import { StrikeZone } from "./StrikeZone";
@@ -874,7 +875,7 @@ function CounterfactualExplorer() {
 // sprints add tabs 2-5. The switcher is intentionally minimal — no router yet.
 // ============================================================
 
-type TopTab = "counterfactual" | "pitcher_profile" | "rollout_viewer" | "mcsim";
+type TopTab = "counterfactual" | "pitcher_profile" | "rollout_viewer" | "mcsim" | "score_prediction";
 
 function TabSwitcher({ tab, onChange }: { tab: TopTab; onChange: (t: TopTab) => void }) {
   const tabs: { id: TopTab; label: string }[] = [
@@ -882,6 +883,7 @@ function TabSwitcher({ tab, onChange }: { tab: TopTab; onChange: (t: TopTab) => 
     { id: "rollout_viewer", label: "AB rollout viewer" },
     { id: "pitcher_profile", label: "Pitcher profile" },
     { id: "mcsim", label: "Matchup cards" },
+    { id: "score_prediction", label: "Score predictions" },
   ];
   return (
     <nav className="border-b border-gray-200 mb-8">
@@ -925,6 +927,7 @@ export default function App() {
         </div>
       )}
       {tab === "mcsim" && <MCSimTab />}
+      {tab === "score_prediction" && <ScorePredictionTab />}
     </>
   );
 }

@@ -10,7 +10,7 @@ on (a slice of) that same data — which is asymptotically biased (the model
 - For each unit, evaluate using the model that DIDN'T see that unit's game
   during training.
 
-CLAUDE.md hard rule #3 + ADR 006: K=5, blocked by ``game_pk``, stratified by
+ADR 006: K=5, blocked by ``game_pk``, stratified by
 season. Single-fit AIPW numbers don't go in PRs or the writeup.
 
 This module is the *aggregator*. It assumes the K nuisance checkpoints already
@@ -80,7 +80,7 @@ class CrossfitConfig:
                 raise FileNotFoundError(
                     f"fold {fold_id} checkpoint not found at {path}. "
                     f"Train it before running cross-fit AIPW. Single-fit AIPW "
-                    f"numbers are not reportable per CLAUDE.md hard rule #3."
+                    f"numbers are not reportable per ADR 006."
                 )
         if not Path(self.folds_path).exists():
             raise FileNotFoundError(

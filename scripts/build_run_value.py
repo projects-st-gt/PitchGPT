@@ -9,7 +9,7 @@ and use *training data only*. Outputs:
   (the multiplier ``in_play_run_value`` uses to convert xwOBA-on-contact
   into a run-value contribution; not Tango's per-PA wOBA scale)
 
-Training years per ``CLAUDE.md`` temporal split: 2017–2023.
+Training years per the project temporal split: 2017–2023.
 
 After this runs, prints the 2023 RE24 table inline so we can eyeball the
 "bases empty, 0 outs ≈ 0.50" sanity check.

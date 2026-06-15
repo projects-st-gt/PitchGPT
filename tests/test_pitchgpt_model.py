@@ -531,7 +531,7 @@ def test_execution_logits_for_type_marginal_sums_to_one():
 
     with torch.no_grad():
         out = model(**batch)
-        # TYPE head emits 8 logits with PAD at index 0 (see CLAUDE.md). PAD is
+        # TYPE head emits 8 logits with PAD at index 0. PAD is
         # not a treatment a pitcher can choose, so π̂(type|h) for a marginal
         # over treatments is the softmax restricted to the 7 real types and
         # renormalized — otherwise the weights sum to 1 - π̂(PAD) < 1.

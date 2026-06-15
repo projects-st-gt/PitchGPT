@@ -19,7 +19,7 @@ The contrast ``τ̂(a, a') = ψ̂(a) − ψ̂(a')`` is what the demo / writeup r
 (e.g., "average effect of SL vs FF on 0-2 to RHB"). Variance follows the
 influence-function estimator: ``Var(τ̂) = (1/n²) Σ_i (φ_i(a) - φ_i(a'))²``.
 
-**Cross-fitting is mandatory** for any reported ψ̂ / τ̂ (CLAUDE.md hard rule #3).
+**Cross-fitting is mandatory** for any reported ψ̂ / τ̂ (ADR 006).
 This module computes per-unit terms with a SINGLE-fit nuisance (developer mode);
 :mod:`causal.crossfit` does the cross-fit aggregation across K=5 fold models.
 
@@ -186,7 +186,7 @@ def compute_aipw_per_unit(
     # π̂(a | H_i): propensity at the position predicting pitch k = seq idx NC + (k-1).
     # The propensity head outputs a softmax over the 8-class TYPE vocab —
     # see ``data.dataset.MODEL_PITCH_TYPES_*`` constants and the
-    # "Bug-prevention discipline" section in CLAUDE.md for the convention.
+    # See ``data.dataset.MODEL_PITCH_TYPES_*`` for the type-vocab convention.
     NC = nuisance.model.N_CONTEXT_TOKENS
     pi_full = out.propensity_probs["type"][
         0, NC + (k - 1), MODEL_PITCH_TYPES_START_IDX:MODEL_PITCH_TYPES_END_IDX

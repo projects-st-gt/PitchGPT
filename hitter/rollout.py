@@ -256,7 +256,7 @@ def load_hitter_ctx(model_dir: str = "checkpoints/hitter", fold_id: int = 0,
 def build_cell_step_fn(ctx: dict, *, pitcher_id: int, batter_id: int,
                        stand: str, throws: str, game_date: str,
                        ballpark_id: int = 0, umpire_id: int = 0,
-                       catcher_id: int = 0):
+                       catcher_id: int = 0, inning_half: int = 1):
     """Build the hitter_step_fn for one matchup cell from a loaded ``ctx``.
 
     Pulls the batter & pitcher profiles as-of ``game_date`` (leakage-safe), derives
@@ -278,5 +278,6 @@ def build_cell_step_fn(ctx: dict, *, pitcher_id: int, batter_id: int,
         velo_by_type=velo, spin_by_type=spin,
         same_hand=int(str(stand) == str(throws)), centroids=ctx["cent"],
         ctx_cat={"umpire_id": int(umpire_id), "catcher_id": int(catcher_id),
-                 "ballpark_id": int(ballpark_id), "roof_state": 1, "temp_bucket": 4},
+                 "ballpark_id": int(ballpark_id), "roof_state": 1, "temp_bucket": 4,
+                 "inning_half": int(inning_half)},
         foul_rate_fn=ctx["hm"].foul_rate)

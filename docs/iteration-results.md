@@ -1,6 +1,6 @@
 # PitchGPT iteration results — Tier A & Tier B
 
-Running log of the predictive-power iteration roadmap (`~/.claude/plans/ultrathink-and-brainstorm-how-compiled-moon.md`).
+Running log of the predictive-power iteration roadmap.
 Each row = one trained `small` (25M) variant on the 2024-H1 val split, leak-clean (sorted by `pitch_number`
 within each at-bat). **π̂ = pitch-type top-1; μ̂ = result top-1.** Per-class breakdown column tracks the weak
 spots (CU = curveball, FC = cutter, CH = changeup). Numbers are the in-training-subsample eval unless marked
@@ -35,7 +35,7 @@ spots (CU = curveball, FC = cutter, CH = changeup). Numbers are the in-training-
 
 ## Generalization eval — held-out-pitcher cohort (Sprint 0a)
 
-First time this has been run for PitchGPT. Evaluated `small-v5-A1` calibrated checkpoint against the 2024-H1 val split, split into pitchers who debuted ≤ 2023 ("main") vs ≥ 2024 ("held-out"). The held-out cohort tests whether the profile-based encoder generalizes or just memorizes pitcher IDs (per the `eval-protocol` skill and CLAUDE.md).
+First time this has been run for PitchGPT. Evaluated `small-v5-A1` calibrated checkpoint against the 2024-H1 val split, split into pitchers who debuted ≤ 2023 ("main") vs ≥ 2024 ("held-out"). The held-out cohort tests whether the profile-based encoder generalizes or just memorizes pitcher IDs (per the eval protocol).
 
 | Cohort | Pitchers | Pitches | π̂ top-1 | μ̂ top-1 | Type ECE | Result ECE |
 |---|---|---|---|---|---|---|

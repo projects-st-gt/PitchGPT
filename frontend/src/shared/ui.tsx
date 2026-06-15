@@ -29,7 +29,7 @@ export function Caption({ children }: { children: React.ReactNode }) {
 }
 
 // Bare pitch-type glyph (color + shape). Color alone fails ~8% of male users
-// per CLAUDE.md hard rule #8, so the glyph always accompanies the color.
+// so the glyph always accompanies the color (accessibility).
 export function PitchGlyph({ type, dim = false }: { type: PitchType; dim?: boolean }) {
   const { color, glyph } = PITCH_TYPE_GLYPHS[type];
   return (

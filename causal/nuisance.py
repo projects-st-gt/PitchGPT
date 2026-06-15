@@ -127,11 +127,81 @@ class NuisanceModels:
             )
         self.apply_temperatures = bool(apply_temperatures)
 
+        self.count_temperatures: dict[str, dict[str, float]] = ckpt.get(
+            "count_temperatures", {}
+        )
+
         self.profiles_dir = Path(profiles_dir)
         self.standardize_profiles = bool(standardize_profiles)
         self._pitcher_cache: ProfileCache | None = None
         self._batter_cache: ProfileCache | None = None
         self._standardizer: ProfileStandardizer | None = None
+
+        # v9: precompute velo/spin bin → continuous conversion tables so the
+        # rollout can pass real mph/rpm to the cascade instead of pitcher means.
+        self._init_bin_converters()
+
+    # ---------- velo/spin bin → continuous converters (v9) ----------
+
+    def _init_bin_converters(self):
+        """Precompute bin-center tables for velo (z-score deciles) and spin (rpm edges)."""
+        import json
+        from data.preprocess import VELO_DECILE_CUTS
+
+        # Velo: bins are z-score deciles. Compute bin-center z-scores.
+        # VELO_DECILE_CUTS = [-inf, -1.28, -0.84, ..., 1.28, inf] → 10 bins.
+        # Bin center = midpoint of adjacent edges, clipping inf to ±2.5.
+        edges = [max(e, -2.5) if e != float('-inf') else -2.5 for e in VELO_DECILE_CUTS]
+        edges = [min(e, 2.5) if e != float('inf') else 2.5 for e in edges]
+        self._velo_bin_centers = [(edges[i] + edges[i + 1]) / 2 for i in range(len(edges) - 1)]
+
+        # League per-type velo stats for converting z-score → mph
+        velo_path = Path("data/preprocess_artifacts/v2/league_velo_stats.parquet")
+        if velo_path.exists():
+            import pandas as pd
+            lvs = pd.read_parquet(velo_path)
+            from data.dataset import PITCH_TYPES
+            self._league_velo = {}
+            for pt in PITCH_TYPES:
+                if pt in lvs.index:
+                    self._league_velo[pt] = (float(lvs.loc[pt, "mean"]), float(lvs.loc[pt, "std"]))
+        else:
+            self._league_velo = {}
+
+        # Spin: absolute RPM edges
+        spin_path = Path("data/preprocess_artifacts/v2/spin_rate_edges.json")
+        if spin_path.exists():
+            se = json.load(open(spin_path))
+            raw_edges = se["edges"]
+            # 7 edges → 8 bins. Add outer bounds.
+            full_edges = [1400.0] + raw_edges + [3200.0]
+            self._spin_bin_centers = [
+                (full_edges[i] + full_edges[i + 1]) / 2 for i in range(len(full_edges) - 1)
+            ]
+        else:
+            self._spin_bin_centers = []
+
+    def velo_bin_to_mph(self, type_id: int, velo_bin: int) -> float:
+        """Convert a sampled velo bin (0-indexed, 0..9) to approximate mph.
+
+        Uses the bin-center z-score × pitcher-type std + mean. Falls back to
+        league mean if the conversion tables aren't loaded.
+        """
+        from data.dataset import PITCH_TYPES
+        if not self._velo_bin_centers or not self._league_velo:
+            return 90.0  # fallback
+        pt = PITCH_TYPES[max(0, min(type_id - 1, 6))]  # type_id is 1-indexed
+        mean, std = self._league_velo.get(pt, (90.0, 3.0))
+        bin_idx = max(0, min(velo_bin, len(self._velo_bin_centers) - 1))
+        z = self._velo_bin_centers[bin_idx]
+        return mean + z * std
+
+    def spin_bin_to_rpm(self, spin_bin: int) -> float:
+        """Convert a sampled spin_rate bin (0-indexed, 0..7) to approximate rpm."""
+        if not self._spin_bin_centers:
+            return 2200.0  # fallback
+        bin_idx = max(0, min(spin_bin, len(self._spin_bin_centers) - 1))
+        return self._spin_bin_centers[bin_idx]
 
     # ---------- profile-cache lazy loaders ----------
 

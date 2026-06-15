@@ -34,6 +34,16 @@ from mcsim.storage import (
 DEFAULT_CKPT = Path("checkpoints_modal/releases/tiny-v1c1-sax-cal-20260611.pt")
 
 
+def _load_ballpark_vocab(artifact_dir: str = "data/preprocess_artifacts/v2") -> dict[int, int]:
+    """Load the venue_id → ballpark_id vocabulary mapping from preprocessing."""
+    import pandas as pd
+    path = Path(artifact_dir) / "ballpark_vocab.parquet"
+    if not path.exists():
+        return {}
+    df = pd.read_parquet(path)
+    return dict(zip(df["raw_id"].astype(int), df["vocab_id"].astype(int)))
+
+
 def compute_ckpt_hash(ckpt_path: Path, *, n_chars: int = 16) -> str:
     """Truncated sha256 of the checkpoint file bytes — provenance for which
     exact weights produced a prediction. No such helper existed elsewhere."""
@@ -45,12 +55,16 @@ def compute_ckpt_hash(ckpt_path: Path, *, n_chars: int = 16) -> str:
 
 
 def _compute_one_game(nuisance, game, date: str, n_paths: int, rng_seed,
-                      progress_every=None, outcome_model="head", hitter_ctx=None):
+                      progress_every=None, outcome_model="head", hitter_ctx=None,
+                      ballpark_vocab=None):
     """Fetch both rosters for one game and compute its all-vs-all card.
 
     Shared by the sequential and parallel paths so they produce identical
     card structure.
     """
+    ballpark_id = 0
+    if ballpark_vocab and game.venue_id is not None:
+        ballpark_id = ballpark_vocab.get(game.venue_id, 1)  # UNK=1 for unseen venues
     home_p, home_h = get_active_roster(
         game.home_team_id, date, probable_pitcher_id=game.home_probable_pitcher_id)
     away_p, away_h = get_active_roster(
@@ -65,6 +79,7 @@ def _compute_one_game(nuisance, game, date: str, n_paths: int, rng_seed,
         away_pitchers=away_p,
         home_lineup=home_h,
         away_lineup=away_h,
+        ballpark_id=ballpark_id,
         n_paths=n_paths,
         rng_seed=rng_seed,
         progress_every=progress_every,
@@ -82,6 +97,7 @@ def _compute_one_game(nuisance, game, date: str, n_paths: int, rng_seed,
 _WORKER_NUISANCE = None  # populated once per worker process by _init_worker
 _WORKER_HITTER_CTX = None  # cascade context (hitter mode only)
 _WORKER_OUTCOME_MODEL = "head"
+_WORKER_BALLPARK_VOCAB = None
 
 
 def _init_worker(ckpt_path_str: str, outcome_model: str = "head",
@@ -89,9 +105,10 @@ def _init_worker(ckpt_path_str: str, outcome_model: str = "head",
     import torch as _torch
 
     _torch.set_num_threads(1)
-    global _WORKER_NUISANCE, _WORKER_HITTER_CTX, _WORKER_OUTCOME_MODEL
+    global _WORKER_NUISANCE, _WORKER_HITTER_CTX, _WORKER_OUTCOME_MODEL, _WORKER_BALLPARK_VOCAB
     _WORKER_NUISANCE = load_nuisance_auto(Path(ckpt_path_str), device="cpu")
     _WORKER_OUTCOME_MODEL = outcome_model
+    _WORKER_BALLPARK_VOCAB = _load_ballpark_vocab()
     if outcome_model == "hitter":
         from hitter.rollout import load_hitter_ctx
         _WORKER_HITTER_CTX = load_hitter_ctx(hitter_dir)
@@ -102,7 +119,8 @@ def _worker_compute_game(task):
     try:
         card = _compute_one_game(
             _WORKER_NUISANCE, game, date, n_paths, rng_seed, progress_every=progress_every,
-            outcome_model=_WORKER_OUTCOME_MODEL, hitter_ctx=_WORKER_HITTER_CTX)
+            outcome_model=_WORKER_OUTCOME_MODEL, hitter_ctx=_WORKER_HITTER_CTX,
+            ballpark_vocab=_WORKER_BALLPARK_VOCAB)
         return (game.game_pk, game.away_team, game.home_team, card, None)
     except Exception:
         return (game.game_pk, game.away_team, game.home_team, None, traceback.format_exc())
@@ -177,11 +195,13 @@ def run_matchup_cards(
         from hitter.rollout import load_hitter_ctx
         hitter_ctx = load_hitter_ctx(hitter_dir)
 
+    ballpark_vocab = _load_ballpark_vocab()
     for g in games:
         try:
             card = _compute_one_game(nuisance, g, date, n_paths, rng_seed,
                                      progress_every=progress_every,
-                                     outcome_model=outcome_model, hitter_ctx=hitter_ctx)
+                                     outcome_model=outcome_model, hitter_ctx=hitter_ctx,
+                                     ballpark_vocab=ballpark_vocab)
             _persist_and_log(g.game_pk, g.away_team, g.home_team, card)
             cards.append(card)
         except Exception as e:  # one bad game must not abort the batch

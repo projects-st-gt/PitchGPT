@@ -16,7 +16,7 @@ The script loads:
   2. Model teacher-forced type marginals from sampled held-out validation PAs
      (augmented 2024-01-01..2024-07-15).
 
-Convention notes (read CLAUDE.md "Bug-prevention discipline"):
+Convention notes:
   - type_id parquet: 1..7 (FF=1 ... FS=7), PAD=0.
   - Model type head: 8 logits, PAD at index 0, FF at index 1 ... FS at index 7.
   - Slicing model type head: propensity_probs["type"][..., 1:8] for real types.
@@ -150,7 +150,7 @@ def _load_val_ab_groups(n_abs: int, seed: int) -> list[pd.DataFrame]:
     """Sample ``n_abs`` at-bats from the validation split augmented data.
 
     Returns a list of DataFrames, each being one AB's rows in pitch order.
-    Uses val split (2024-01-01..2024-07-15) per CLAUDE.md temporal split rules.
+    Uses val split (2024-01-01..2024-07-15) per temporal split rules.
     """
     files = _augmented_files(2024, 2024, date_start=_VAL_START, date_end=_VAL_END)
     if not files:

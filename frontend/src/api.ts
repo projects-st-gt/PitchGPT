@@ -100,3 +100,42 @@ export async function getMcsimCard(
   if (!res.ok) throw new Error(`/mcsim/predictions/${gamePk}: ${res.status} ${await res.text()}`);
   return res.json();
 }
+
+// ---- Game Sim (score predictions) ----
+
+const STATIC_DATA = import.meta.env.VITE_STATIC_DATA === "true";
+const DATA_BASE = STATIC_DATA ? `${import.meta.env.BASE_URL}data` : null;
+
+async function fetchJsonOrStatic<T>(apiPath: string, staticPath: string): Promise<T> {
+  if (DATA_BASE) {
+    const res = await fetch(`${DATA_BASE}/${staticPath}`);
+    if (!res.ok) throw new Error(`static ${staticPath}: ${res.status}`);
+    return res.json();
+  }
+  const res = await fetch(`${API_BASE}${apiPath}`);
+  if (!res.ok) throw new Error(`${apiPath}: ${res.status} ${await res.text()}`);
+  return res.json();
+}
+
+export async function listGameSimDates(): Promise<{ dates: string[]; default_date: string }> {
+  return fetchJsonOrStatic("/mcsim/gamesim/dates", "gamesim-dates.json");
+}
+
+export async function listGameSims(
+  date: string,
+): Promise<import("./types").GameSimListResponse> {
+  return fetchJsonOrStatic(
+    `/mcsim/gamesim?date=${encodeURIComponent(date)}`,
+    `gamesim-${date}.json`,
+  );
+}
+
+export async function getGameSimDetail(
+  gamePk: number,
+  date: string,
+): Promise<import("./types").GameSimDetail> {
+  return fetchJsonOrStatic(
+    `/mcsim/gamesim/${gamePk}?date=${encodeURIComponent(date)}`,
+    `gamesim-${date}-${gamePk}.json`,
+  );
+}

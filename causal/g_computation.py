@@ -499,13 +499,27 @@ def g_compute(
         seq_idx_for_predicting_step = nuisance.model.N_CONTEXT_TOKENS + (step - 1)
         # The TYPE head outputs over the 8-class vocab. Slice via the named
         # constants — see ``data.dataset.MODEL_PITCH_TYPES_*`` and the
-        # "Bug-prevention discipline" in CLAUDE.md. Sampled value ∈ [0, 7) maps
+        # See data/dataset.py for convention. Sampled value ∈ [0, 7) maps
         # to PITCH_TYPES; write back to the dataset's type_id by adding
         # TYPE_ID_OFFSET (=MODEL_PITCH_TYPES_START_IDX=1).
-        type_probs = out.propensity_probs["type"][
-            :, seq_idx_for_predicting_step,
-            MODEL_PITCH_TYPES_START_IDX:MODEL_PITCH_TYPES_END_IDX,
-        ]
+        # At context-token positions (seq_idx < NC), the type head was never
+        # trained — it puts most mass on PAD (index 0). Read from raw logits
+        # with PAD masked out so the model is forced to distribute probability
+        # over real pitch types only.
+        NC = nuisance.model.N_CONTEXT_TOKENS
+        if seq_idx_for_predicting_step < NC:
+            _type_logits = out.propensity_logits["type"][
+                :, seq_idx_for_predicting_step, :
+            ].clone()
+            _type_logits[:, 0] = -1e9  # mask PAD logit
+            type_probs = torch.softmax(_type_logits, dim=-1)[
+                :, MODEL_PITCH_TYPES_START_IDX:MODEL_PITCH_TYPES_END_IDX
+            ]
+        else:
+            type_probs = out.propensity_probs["type"][
+                :, seq_idx_for_predicting_step,
+                MODEL_PITCH_TYPES_START_IDX:MODEL_PITCH_TYPES_END_IDX,
+            ]
         type_probs = type_probs / type_probs.sum(dim=-1, keepdim=True).clamp_min(1e-12)
 
         # Capture the natural type propensity π̂(type | h) at the intervention
@@ -617,6 +631,32 @@ def g_compute(
             step_kwargs["plate_z"] = np.clip(loc_np[:, 1], 0.0, 5.0)
             step_kwargs["spin_axis_sin"] = full["spin_axis"][:, step, 0].numpy()
             step_kwargs["spin_axis_cos"] = full["spin_axis"][:, step, 1].numpy()
+
+            # v9 fix: convert sampled velo/spin BINS to approximate continuous
+            # values so the cascade sees realistic variation instead of flat
+            # per-type means. Velo bins are league z-score deciles (1..10,
+            # PAD=0); convert via bin-center z-score × pitcher's per-type std
+            # + per-type mean. Spin bins are absolute RPM edges (1..8, PAD=0).
+            if hasattr(nuisance, '_velo_bin_centers'):
+                tids = full["type"][:, step].numpy()  # 1-indexed type_id
+                vbins = sampled_velo  # 0-indexed velo bin
+                velo_mph = np.zeros(N, dtype=np.float32)
+                for ii in range(N):
+                    if not active[ii]:
+                        continue
+                    tid = int(tids[ii])
+                    vb = int(vbins[ii])
+                    velo_mph[ii] = nuisance.velo_bin_to_mph(tid, vb)
+                step_kwargs["velo_native"] = velo_mph
+
+            if hasattr(nuisance, '_spin_bin_centers'):
+                sbins = sampled_spin_rate
+                spin_rpm = np.zeros(N, dtype=np.float32)
+                for ii in range(N):
+                    if not active[ii]:
+                        continue
+                    spin_rpm[ii] = nuisance.spin_bin_to_rpm(int(sbins[ii]))
+                step_kwargs["spin_native"] = spin_rpm
 
         # --- Determine the pitch's result --------------------------------------
         if outcome_model == "hitter":

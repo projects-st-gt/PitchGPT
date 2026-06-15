@@ -3,7 +3,7 @@ Smoke tests for PitchGPT v2 ContinuousGMM and V2InputLayer.
 
 Each test prints at least one named numerical value so that convention bugs
 (wrong slice, wrong dimension) surface immediately — in line with the
-project's bug-prevention discipline (CLAUDE.md §bug-prevention).
+project's bug-prevention discipline.
 """
 
 from __future__ import annotations

@@ -44,7 +44,7 @@ SEED = 42
 
 
 def load_test_split() -> pd.DataFrame:
-    """Test split per CLAUDE.md hard rule 2: 2024 H2 + 2025."""
+    """Test split: 2024 H2 + 2025."""
     files = sorted(Path("data/augmented/2024").glob("2024-*.parquet"))
     files = [f for f in files if f.stem >= "2024-07-16"]
     files += sorted(Path("data/augmented/2025").glob("2025-*.parquet"))

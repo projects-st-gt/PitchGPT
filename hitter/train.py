@@ -193,7 +193,7 @@ def foul_rate_by_count(df: pd.DataFrame) -> dict[tuple[int, int], float]:
 _BATTER_COLS = [f"b{i}" for i in range(57)]          # BATTER_VECTOR_LEN
 _PITCHER_COLS = [f"p{i}" for i in range(len(PITCHER_STUFF_FEATURES))]
 _MOVEMENT_COLS = ["release_spin_rate", "spin_axis_sin", "spin_axis_cos"]
-_COMMON_FEATURES = BASE_FEATURE_COLS + _MOVEMENT_COLS + ["outs_when_up"] \
+_COMMON_FEATURES = BASE_FEATURE_COLS + _MOVEMENT_COLS + ["outs_when_up", "inning_half"] \
     + _BATTER_COLS + _PITCHER_COLS
 
 #: Per-node feature list. S1b (called_strike) is mostly location/umpire/framing —
@@ -202,18 +202,18 @@ _S3_FEATURES = _COMMON_FEATURES + ["ballpark_id", "roof_state", "temp_bucket"]
 NODE_FEATURES: dict[str, list[str]] = {
     "swing": _COMMON_FEATURES + DECEPTION_FEATURE_COLS,
     "whiff": _COMMON_FEATURES + DECEPTION_FEATURE_COLS,
-    "called_strike": (BASE_FEATURE_COLS + ["umpire_id", "catcher_id"]
+    "called_strike": (BASE_FEATURE_COLS + ["umpire_id", "catcher_id", "inning_half"]
                       + _BATTER_COLS),
     "contact_quality": _S3_FEATURES,
     "contact_outcome": _S3_FEATURES,          # multiclass {out,1B,2B,3B,HR}
 }
 #: High-cardinality id columns handled via XGBoost native categorical support.
 NODE_CATEGORICAL: dict[str, list[str]] = {
-    "swing": [],
-    "whiff": [],
-    "called_strike": ["umpire_id", "catcher_id"],
-    "contact_quality": ["ballpark_id", "roof_state", "temp_bucket"],
-    "contact_outcome": ["ballpark_id", "roof_state", "temp_bucket"],
+    "swing": ["inning_half"],
+    "whiff": ["inning_half"],
+    "called_strike": ["umpire_id", "catcher_id", "inning_half"],
+    "contact_quality": ["ballpark_id", "roof_state", "temp_bucket", "inning_half"],
+    "contact_outcome": ["ballpark_id", "roof_state", "temp_bucket", "inning_half"],
 }
 #: Monotone priors kept minimal + clean (forcing wrong ones hurts calibration).
 #: whiff never decreases with velo (chase-and-miss) — the one unambiguous prior.

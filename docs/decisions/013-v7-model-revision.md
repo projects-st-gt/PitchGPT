@@ -81,8 +81,8 @@ P(pitch | h) = P(type | h) · P(zone, velo, spin_rate, spin_axis | type, h)
   by construction (modulo shared-trunk training dynamics, which are measured).
 - **Convention discipline.** Wiring the type factor into the execution heads
   crosses the PAD / 8-class type convention (`data/dataset.py` —
-  `MODEL_TYPE_ID`, `MODEL_PITCH_TYPES_START_IDX/END_IDX`). Per CLAUDE.md's
-  bug-prevention section, the implementation must use the named constants and
+  `MODEL_TYPE_ID`, `MODEL_PITCH_TYPES_START_IDX/END_IDX`). Per the project's
+  bug-prevention conventions, the implementation must use the named constants and
   print named per-class checks; this is exactly where a convention bug hides.
 - **Back-compat:** gated behind a config flag (e.g. `type_conditioned_heads`),
   default `False`, so pre-v7 checkpoints reload unchanged.

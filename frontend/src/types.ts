@@ -16,7 +16,7 @@ export const PITCH_TYPE_NAMES: Record<PitchType, string> = {
   FS: "Splitter",
 };
 
-// Color + glyph (color alone fails ~8% of male users per CLAUDE.md).
+// Color + glyph (color alone fails ~8% of male users).
 export const PITCH_TYPE_GLYPHS: Record<PitchType, { color: string; glyph: string }> = {
   FF: { color: "#dc2626", glyph: "●" }, // red ●
   SI: { color: "#ea580c", glyph: "◆" }, // orange ◆
@@ -392,4 +392,98 @@ export interface McsimCardResponse {
   winner: string | null;
   unmatched_event_count: number;
   card: McsimCard;
+}
+
+// ============================================================
+// Score Prediction (game sim) — Monte Carlo full-game simulation
+// (backend: inference/mcsim_api.py /gamesim endpoints)
+// ============================================================
+
+export interface GameSimSummary {
+  game_pk: number;
+  prediction_date: string;
+  home_team: string;
+  away_team: string;
+  win_prob_home: number;
+  win_prob_away: number;
+  projected_home: number;
+  projected_away: number;
+  projected_total: number;
+  home_starter_name: string | null;
+  away_starter_name: string | null;
+  has_actual: boolean;
+  final_score_home: number | null;
+  final_score_away: number | null;
+  winner: string | null;
+  predicted_winner_correct: boolean | null;
+}
+
+export interface GameSimListResponse {
+  date: string;
+  count: number;
+  games: GameSimSummary[];
+}
+
+export interface StarterHookStats {
+  hooked_pct: number;
+  avg_hook_inning?: number;
+  median_hook_inning?: number;
+  avg_bf_at_hook?: number;
+  hook_inning_dist?: Record<string, number>;
+}
+
+export interface RelieverUsage {
+  pitcher_id: number;
+  appearances: number;
+  pct: number;
+}
+
+export interface BullpenTeamStats {
+  starter_hook: StarterHookStats;
+  relievers_used: RelieverUsage[];
+}
+
+export interface PitcherStaff {
+  pitcher_id: number;
+  name: string;
+  throws: string;
+  is_starter: boolean;
+  workload_bf?: number | null;
+}
+
+export interface GameSimDetail {
+  game_pk: number;
+  prediction_date: string;
+  home_team: string;
+  away_team: string;
+  sim: {
+    n_sims: number;
+    home_team: string;
+    away_team: string;
+    win_prob_home: number;
+    win_prob_away: number;
+    projected_score: { home: number; away: number };
+    median_score: { home: number; away: number };
+    projected_total_runs: number;
+    total_runs_90pct_band: [number, number];
+    n_backstop: number;
+    inning_runs_home: number[];
+    inning_runs_away: number[];
+    home_starter_name?: string;
+    away_starter_name?: string;
+    home_starter_workload?: number;
+    away_starter_workload?: number;
+    total_runs_dist?: Record<string, number>;
+    margin_dist?: Record<string, number>;
+    bullpen_stats?: {
+      home: BullpenTeamStats;
+      away: BullpenTeamStats;
+    };
+  };
+  has_actual: boolean;
+  final_score_home: number | null;
+  final_score_away: number | null;
+  winner: string | null;
+  home_staff: PitcherStaff[];
+  away_staff: PitcherStaff[];
 }

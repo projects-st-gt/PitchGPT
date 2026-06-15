@@ -1,4 +1,4 @@
-"""Unit tests for the temporal split per CLAUDE.md."""
+"""Unit tests for the temporal split."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ def _df(dates):
     return pd.DataFrame({"game_date": pd.to_datetime(dates)})
 
 
-def test_split_constants_match_claude_md():
+def test_split_constants_match_project_conventions():
     assert TRAIN_END == pd.Timestamp("2023-12-31")
     assert VAL_START == pd.Timestamp("2024-01-01")
     assert VAL_END == pd.Timestamp("2024-07-15")

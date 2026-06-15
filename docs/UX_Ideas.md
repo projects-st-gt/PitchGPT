@@ -203,7 +203,7 @@ we have `umpire_id` as a categorical context).
 
 ## Cross-cutting design principles
 
-(Locked from CLAUDE.md and our discussions:)
+(Locked from project conventions:)
 
 - **Apple-minimalist design**: Inter font only (SF Pro license violation),
   monochromatic + one teal accent + amber warn + red refusal-only.

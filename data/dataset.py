@@ -30,7 +30,7 @@ PITCH_TYPES: list[str] = ["FF", "SI", "FC", "SL", "CU", "CH", "FS"]
 PITCH_TYPE_TO_ID: dict[str, int] = {p: i for i, p in enumerate(PITCH_TYPES)}
 N_PITCH_TYPES: int = len(PITCH_TYPES)
 
-# ----- Model-side type vocabulary convention (read CLAUDE.md "Bug-prevention discipline") -----
+# ----- Model-side type vocabulary convention -----
 #
 # The pitch-type FACTOR is stored in the parquet as integer ids 1..7 with PAD=0
 # (see ``data.preprocess_pitchgpt.compute_type_id``). The model's propensity
@@ -76,7 +76,7 @@ N_RESULTS: int = len(RESULT_CLASSES)
 # default ``ignore_index`` for cross-entropy loss so the loss skips these.
 PAD_ID: int = -100
 
-# Temporal split per CLAUDE.md (non-negotiable). All bounds are inclusive.
+# Temporal split (non-negotiable). All bounds are inclusive.
 # 2026+ data is intentionally outside every split: it is reserved for live-demo
 # inference and ad-hoc validation. Adding 2026 to test would inflate the
 # "generalization" claim with what is really an OOD slice on which the model
@@ -104,7 +104,7 @@ _HR_EVENTS = frozenset({"home_run"})
 
 
 def temporal_split_mask(pitches: pd.DataFrame) -> dict[str, pd.Series]:
-    """Boolean masks for the train / val / test temporal split per CLAUDE.md.
+    """Boolean masks for the train / val / test temporal split.
 
     Returns a dict with keys ``"train"``, ``"val"``, ``"test"``. Boundaries:
 
@@ -131,7 +131,7 @@ def temporal_split_mask(pitches: pd.DataFrame) -> dict[str, pd.Series]:
 
 
 def temporal_split(pitches: pd.DataFrame) -> dict[str, pd.DataFrame]:
-    """Train / val / test slices per CLAUDE.md temporal split.
+    """Train / val / test slices per the project temporal split.
 
     Returns DataFrame views (not copies) sharing memory with the input.
     """

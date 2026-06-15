@@ -20,7 +20,7 @@ from mcsim.state import ReferenceContext
 from mcsim.storage import (
     DEFAULT_DB_PATH, init_db, register_model_version, write_prediction,
 )
-from scripts.mcsim.run_matchup_cards import compute_ckpt_hash
+from scripts.mcsim.run_matchup_cards import compute_ckpt_hash, _load_ballpark_vocab
 
 LOCAL_CKPT = Path("checkpoints_modal/releases/tiny-v1c1-sax-cal-20260611.pt")
 
@@ -53,6 +53,7 @@ def main() -> None:
     from modal_app import app, row_remote
 
     # Build all row work-units + per-game metadata for the merge.
+    ballpark_vocab = _load_ballpark_vocab()
     games_meta: dict = {}
     tasks: list = []
     for date in args.dates:
@@ -60,6 +61,9 @@ def main() -> None:
         if args.max_games:
             games = games[: args.max_games]
         for g in games:
+            bp_id = 0
+            if ballpark_vocab and g.venue_id is not None:
+                bp_id = ballpark_vocab.get(g.venue_id, 1)
             home_p, home_h = get_active_roster(
                 g.home_team_id, date, probable_pitcher_id=g.home_probable_pitcher_id)
             away_p, away_h = get_active_roster(
@@ -70,12 +74,15 @@ def main() -> None:
                 "expected_rows": len(home_p) + len(away_p),
             }
             seed = args.rng_seed
-            for half_pitchers, opp_lineup, team in (
-                (home_p, away_h, g.home_team), (away_p, home_h, g.away_team)):
+            # Home pitchers face away lineup (Top); away pitchers face home lineup (Bot)
+            for half_pitchers, opp_lineup, team, inning_half in (
+                (home_p, away_h, g.home_team, "Top"),
+                (away_p, home_h, g.away_team, "Bot")):
                 for p in half_pitchers:
                     tasks.append({
                         "game_pk": g.game_pk, "date": date, "pitcher": p,
                         "lineup": opp_lineup, "team": team,
+                        "ballpark_id": bp_id, "inning_half": inning_half,
                         "n_paths": args.n_paths, "rng_seed": seed * 1000})
                     seed += 1
     print(f"{len(tasks)} pitcher-rows across {len(games_meta)} games "

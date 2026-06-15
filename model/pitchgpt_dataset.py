@@ -500,6 +500,6 @@ def load_augmented_pitches(
 
 
 def split_augmented(pitches: pd.DataFrame) -> dict[str, pd.DataFrame]:
-    """Apply the temporal split (CLAUDE.md) to a loaded augmented DataFrame."""
+    """Apply the temporal split to a loaded augmented DataFrame."""
     masks = temporal_split_mask(pitches)
     return {k: pitches[m].reset_index(drop=True) for k, m in masks.items()}

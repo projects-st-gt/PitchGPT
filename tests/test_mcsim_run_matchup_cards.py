@@ -44,7 +44,7 @@ def test_run_matchup_cards_end_to_end(tmp_path, monkeypatch, capsys):
     nuisance + compute_matchup_card, and assert a row lands in SQLite.
 
     Prints a NAMED numerical output (a real cell's median RV + modal-type pi-hat)
-    per CLAUDE.md bug-prevention discipline.
+    .
     """
     nuisance = NuisanceModels(V7_CKPT, device="cpu")
     df = pd.read_parquet(sorted(VAL_DIR.glob("2024-*.parquet"))[0])

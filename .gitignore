@@ -39,7 +39,21 @@ frontend/*.tsbuildinfo
 .idea/
 *.swp
 
+# AI assistant config
+.claude/
+CLAUDE.md
+
+# Internal planning docs
+CompletePlan.md
+ImprovementPlan.md
+docs/ContextSwitcher.md
+docs/superpowers/
+
 # MCSim local SQLite — predictions + actuals + model_versions. Single-file DB
 # bootstraps from mcsim.storage.init_db() on first call.
 data/mcsim.sqlite
 data/mcsim.sqlite-journal
+
+# Exported static game sim data (regenerable)
+frontend/public/data/
+mcsim/predictions.db

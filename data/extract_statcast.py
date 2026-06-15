@@ -5,7 +5,6 @@ Off-season days return empty; they are still recorded in the checkpoint so
 resume does not retry them. Re-running picks up exactly where the last
 successful day left off.
 
-Skill reference: ``.claude/skills/statcast-pipeline/SKILL.md``.
 """
 
 from __future__ import annotations

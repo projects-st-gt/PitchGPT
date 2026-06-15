@@ -13,18 +13,18 @@ import type {
 
 // Headline metric is projected OPS (a stronger cross-cell discriminator than
 // median run value, which pins to the out-value when most paths are outs).
-// Tint cells cool (pitcher-favorable) -> white (~league avg) -> warm (hitter).
+// Tint cells red (pitcher-favorable, low OPS) -> white (~league avg) -> green (hitter-favorable).
 function opsTint(ops: number | null | undefined): string {
   if (ops == null) return "transparent";
   const lo = 0.4;
   const hi = 1.1;
   const mid = 0.7;
   if (ops <= mid) {
-    const a = (((mid - ops) / (mid - lo)) * 0.35).toFixed(3);
-    return `rgba(74,144,217,${a})`; // --accent-cool
+    const a = (((mid - ops) / (mid - lo)) * 0.3).toFixed(3);
+    return `rgba(230,90,90,${a})`; // light red — pitcher dominates
   }
-  const a = (((ops - mid) / (hi - mid)) * 0.35).toFixed(3);
-  return `rgba(255,107,53,${a})`; // --accent
+  const a = (((ops - mid) / (hi - mid)) * 0.3).toFixed(3);
+  return `rgba(74,190,120,${a})`; // light green — hitter-favorable
 }
 
 function reachedBase(eventType: string | null): boolean {
@@ -291,10 +291,10 @@ export default function MCSimTab() {
   return (
     <div className="w-full px-6 py-8">
       <div className="text-section mb-1">Matchup cards</div>
-      <p className="text-body text-gray-500 mb-6">
+      <p className="text-body text-gray-500 mb-4">
         Pre-game scouting grid — every rostered pitcher against every opposing hitter, in a
-        neutral count. Cells show projected OPS (cool = pitcher-favorable, warm = hitter). Once a
-        game finishes, the real plate appearances are stamped on each cell.
+        neutral count. Cells show projected OPS. Once a game finishes, the real plate appearances
+        are stamped on each cell.
       </p>
 
       <div className="flex items-center gap-3 mb-6">
@@ -367,8 +367,42 @@ export default function MCSimTab() {
             </div>
           )}
 
-          {/* Grids use the full page width; the detail panel sits below so the
-              table isn't squeezed into a column. */}
+          <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-small text-gray-500 mb-4">
+            <span className="font-medium text-gray-600">Cell tint (proj. OPS):</span>
+            <span className="flex items-center gap-1.5">
+              <span className="inline-block w-4 h-4 rounded" style={{ background: "rgba(230,90,90,0.25)" }} />
+              Pitcher-dominant
+            </span>
+            <span className="flex items-center gap-1.5">
+              <span className="inline-block w-4 h-4 rounded border border-gray-200" style={{ background: "white" }} />
+              Neutral
+            </span>
+            <span className="flex items-center gap-1.5">
+              <span className="inline-block w-4 h-4 rounded" style={{ background: "rgba(74,190,120,0.25)" }} />
+              Hitter-favorable
+            </span>
+            <span className="mx-1 text-gray-300">|</span>
+            <span className="font-medium text-gray-600">Modal pitch:</span>
+            <span className="flex items-center gap-1">
+              <span style={{ color: "#dc2626" }}>●</span> FF
+              <span className="ml-1" style={{ color: "#ea580c" }}>◆</span> SI
+              <span className="ml-1" style={{ color: "#ca8a04" }}>■</span> FC
+              <span className="ml-1" style={{ color: "#0d9488" }}>▲</span> SL
+              <span className="ml-1" style={{ color: "#2563eb" }}>★</span> CU
+              <span className="ml-1" style={{ color: "#7c3aed" }}>◐</span> CH
+              <span className="ml-1" style={{ color: "#475569" }}>✕</span> FS
+            </span>
+            <span className="mx-1 text-gray-300">|</span>
+            <span className="font-medium text-gray-600">Actual PAs:</span>
+            <span className="flex items-center gap-1.5">
+              <span className="inline-block w-2 h-2 rounded-full" style={{ background: "#FF6B35" }} />
+              Reached base
+            </span>
+            <span className="flex items-center gap-1.5">
+              <span className="inline-block w-2 h-2 rounded-full" style={{ background: "#86868B" }} />
+              Out
+            </span>
+          </div>
           <StaffGrid
             title={`${card.home_team} pitchers vs ${card.away_team} hitters`}
             rows={homeStaff}

@@ -47,6 +47,7 @@ def main() -> None:
             "home_team": g.home_team, "away_team": g.away_team,
             "home_probable_pitcher_id": g.home_probable_pitcher_id,
             "away_probable_pitcher_id": g.away_probable_pitcher_id,
+            "venue_id": g.venue_id,
             "n_paths": args.n_paths, "rng_seed": args.rng_seed,
         } for g in games]
     print(f"{len(tasks)} games across {len(args.dates)} date(s) -> Modal (L4, n_paths={args.n_paths})")

@@ -1,6 +1,6 @@
 """Tests for the V2 at-bat dataset.
 
-Tests 1-4 use a synthetic fixture (allowed in tests/ per CLAUDE.md rule 1a).
+Tests 1-4 use a synthetic fixture.
 Test 5 loads a real augmented parquet to verify shapes on actual Statcast data.
 """
 
@@ -149,7 +149,7 @@ def test_position_0_is_start_token(dataset_3pitch):
         f"Position 0 pitch_number should be 0, got {item['pitch_number'][0].item()}"
     )
 
-    # Named numerical checks per CLAUDE.md discipline:
+    # Named numerical checks:
     # Position 0 count_state = 0 (start of AB), outs_state = 1, runners_state = 3
     assert item["count_state"][0].item() == 0, (
         f"Position 0 count_state = {item['count_state'][0].item()}, expected 0"
