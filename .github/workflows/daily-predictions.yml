@@ -1,0 +1,98 @@
+name: Daily Predictions
+
+on:
+  schedule:
+    - cron: '0 15 * * *'  # 11am ET (15:00 UTC) — 2+ hours before first pitch
+  workflow_dispatch:
+    inputs:
+      date:
+        description: 'Override date (YYYY-MM-DD). Leave blank for today.'
+        required: false
+        type: string
+
+jobs:
+  predict:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install --quiet \
+            torch --index-url https://download.pytorch.org/whl/cpu \
+            numpy pandas scipy pyarrow scikit-learn xgboost joblib \
+            huggingface-hub
+
+      - name: Clone HF Space (data + checkpoint + profiles)
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          git lfs install
+          git clone --depth 1 https://user:$HF_TOKEN@huggingface.co/spaces/exiledgambit/PitchGPT hf-space
+
+      - name: Copy data to repo layout
+        run: |
+          # Checkpoint
+          cp -r hf-space/checkpoints_modal .
+          cp -r hf-space/checkpoints .
+
+          # Data directories
+          mkdir -p data/profiles data/run_value data/preprocess_artifacts/v2
+          cp hf-space/data/profiles/* data/profiles/
+          cp hf-space/data/run_value/* data/run_value/
+          cp hf-space/data/preprocess_artifacts/* data/preprocess_artifacts/
+          # Code expects v2 subdirectory for ballpark vocab
+          cp hf-space/data/preprocess_artifacts/*.parquet data/preprocess_artifacts/v2/ 2>/dev/null || true
+          cp data/preprocess_artifacts/v2/ballpark_vocab.parquet data/preprocess_artifacts/v2/ 2>/dev/null || true
+          cp hf-space/data/mcsim.sqlite data/mcsim.sqlite
+
+      - name: Determine date
+        id: date
+        run: |
+          if [ -n "${{ inputs.date }}" ]; then
+            echo "date=${{ inputs.date }}" >> $GITHUB_OUTPUT
+          else
+            echo "date=$(date -u +%Y-%m-%d)" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Generate matchup cards
+        run: |
+          echo "Generating matchup cards for ${{ steps.date.outputs.date }}..."
+          python -m scripts.mcsim.run_matchup_cards \
+            --date ${{ steps.date.outputs.date }} \
+            --n-workers 2 \
+            --progress-every 50
+
+      - name: Run game sim
+        run: |
+          echo "Running game sim for ${{ steps.date.outputs.date }}..."
+          python -m scripts.mcsim.run_gamesim \
+            --dates ${{ steps.date.outputs.date }}
+
+      - name: Fetch actuals for past games
+        run: |
+          if [ -f scripts/mcsim/fetch_actuals.py ]; then
+            python -m scripts.mcsim.fetch_actuals || echo "fetch_actuals skipped or failed (non-fatal)"
+          fi
+
+      - name: Push updated DB to HF Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          cd hf-space
+          cp ../data/mcsim.sqlite data/mcsim.sqlite
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add data/mcsim.sqlite
+          if git diff --cached --quiet; then
+            echo "No changes to push"
+          else
+            git commit -m "daily: ${{ steps.date.outputs.date }} predictions"
+            git push https://user:$HF_TOKEN@huggingface.co/spaces/exiledgambit/PitchGPT main
+            echo "Pushed updated predictions to HF Space"
+          fi
