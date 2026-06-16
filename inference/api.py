@@ -85,7 +85,12 @@ from model.pitchgpt_dataset import classify_ab_outcome, AB_OUTCOME_IGNORE
 # App + state
 # ============================================================
 
-DEFAULT_CHECKPOINT = Path("checkpoints_modal/tiny-fold0-v6/checkpoint_calibrated.pt")
+# Default checkpoint: v7 (type-conditioned execution heads — ADR-013 D1, PR #1).
+# v7 gains: spin_rate +17 pt, velo +8 pt, zone +5 pt on val 2024 H1; held-out-
+# pitcher generalization preserved; postseason OOD essentially tied with v6.
+# Most importantly for the causal layer: rollouts under do(type=a) now produce
+# *coherent* pitches (a curveball with curveball-like velo/spin/location).
+DEFAULT_CHECKPOINT = Path("checkpoints_modal/tiny-fold0-v7/checkpoint_calibrated.pt")
 DEFAULT_AUGMENTED_DIR = Path("data/augmented")
 DEFAULT_VAL_GLOB = "2024/2024-*.parquet"  # MVP: serve from val 2024 H1
 
@@ -192,6 +197,23 @@ app.add_middleware(
 from inference.mcsim_api import router as mcsim_router  # noqa: E402
 
 app.include_router(mcsim_router)
+
+
+@app.on_event("startup")
+def _warm_app_state() -> None:
+    """Eagerly load the model, val pitches, and game-teams lookup at boot.
+
+    Without this, the *first* user request pays the ~5–10 s load cost — the
+    demo's first impression. Doing it at startup means uvicorn takes a few
+    extra seconds to come up, then every request is hot. The lazy-load paths
+    in :class:`AppState` are preserved for tests / scripts that import the
+    app without going through the startup event.
+    """
+    print("[api] warming AppState at startup...")
+    AppState.get_nuisance()
+    AppState.get_val()
+    AppState.get_game_teams()
+    print("[api] startup complete; all heavy artifacts loaded.")
 
 
 # ============================================================
