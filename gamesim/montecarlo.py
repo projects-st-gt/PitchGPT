@@ -284,6 +284,9 @@ def simulate_from_card(
     batter_stand_lookup: dict[int, str] | None = None,
     park_factors_table: dict[str, dict[str, float]] | None = None,
     rotation_pitcher_ids: set[int] | None = None,
+    team_quality_table: dict[str, float] | None = None,
+    thin_profile_ids: set[int] | None = None,
+    apply_hfa: bool = True,
 ) -> GameSimResult:
     """Convenience: simulate a game directly from a matchup card payload.
 
@@ -379,6 +382,39 @@ def simulate_from_card(
             rotation_pitcher_ids=rotation_pitcher_ids)
 
 
+    # Adjust outcome distributions for thin-profile batters on bad/good teams
+    if team_quality_table and thin_profile_ids is not None:
+        from gamesim.team_quality import resolve_team_factor, adjust_dist_for_team_quality
+        batter_team: dict[int, str] = {}
+        for pr in payload["rows"]:
+            pitcher_team = pr.get("team", "")
+            bt = away_team if pitcher_team == home_team else home_team
+            for cell in pr["cells"]:
+                batter_team[cell["batter_id"]] = bt
+
+        for key, dist in matchup_dists.items():
+            _, batter_id = key
+            if batter_id not in thin_profile_ids:
+                continue
+            bt = batter_team.get(batter_id)
+            if bt:
+                factor = resolve_team_factor(bt, team_quality_table)
+                matchup_dists[key] = adjust_dist_for_team_quality(dist, factor)
+
+    # Apply home-field advantage: small boost to home batters, penalty to away
+    if apply_hfa:
+        from gamesim.team_quality import adjust_dist_for_hfa
+        batter_is_home: dict[int, bool] = {}
+        for pr in payload["rows"]:
+            pitcher_team = pr.get("team", "")
+            is_home_pitcher = pitcher_team == home_team
+            for cell in pr["cells"]:
+                batter_is_home[cell["batter_id"]] = not is_home_pitcher
+        for key, dist in matchup_dists.items():
+            _, batter_id = key
+            is_home = batter_is_home.get(batter_id, False)
+            matchup_dists[key] = adjust_dist_for_hfa(dist, is_home)
+
     # Resolve park factors for this game's home ballpark
     game_park_factors = None
     if park_factors_table:
@@ -406,7 +442,8 @@ def simulate_from_card(
     result.pitcher_throws = pitcher_throws
     result.home_starter_name = pitcher_names.get(home_starter_id, "Unknown")
     result.away_starter_name = pitcher_names.get(away_starter_id, "Unknown")
-    result.home_starter_workload = workload_table.get(home_starter_id, 24) if workload_table else 24
-    result.away_starter_workload = workload_table.get(away_starter_id, 24) if workload_table else 24
+    from gamesim.bullpen import _resolve_workload_bf
+    result.home_starter_workload = _resolve_workload_bf(workload_table, home_starter_id)
+    result.away_starter_workload = _resolve_workload_bf(workload_table, away_starter_id)
 
     return result

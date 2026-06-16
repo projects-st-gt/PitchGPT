@@ -28,7 +28,7 @@ class PitcherInfo:
     throws: str          # "L" or "R"
     is_starter: bool
     team: str
-    workload_bf: int = 24   # typical batters faced per start (starters only)
+    workload_bf: int = 21   # typical batters faced per start (starters only; league median)
     used: bool = False
 
 
@@ -151,6 +151,19 @@ def load_batter_stand_lookup() -> dict[int, str]:
     return {int(k): v for k, v in raw.items()}
 
 
+DEFAULT_STARTER_BF = 21
+
+
+def _resolve_workload_bf(
+    workload_table: dict[int, int] | None,
+    pid: int,
+) -> int:
+    """Look up a pitcher's recency-weighted BF from the workload table."""
+    if not workload_table or pid not in workload_table:
+        return DEFAULT_STARTER_BF
+    return workload_table[pid]
+
+
 def build_bullpen_policy_from_card(
     payload: dict,
     workload_table: dict[int, int] | None = None,
@@ -161,8 +174,8 @@ def build_bullpen_policy_from_card(
 
     Args:
         payload: the matchup card JSON payload (from SQLite)
-        workload_table: optional {pitcher_id: typical_batters_faced} lookup.
-            If None, uses a default of 24 BF for all starters.
+        workload_table: {pitcher_id: recency_weighted_bf} lookup.
+            If None, uses DEFAULT_STARTER_BF for all starters.
         batter_stand_lookup: optional {batter_id: "R"/"L"/"S"} for platoon matching.
         rotation_pitcher_ids: optional set of pitcher IDs to exclude from bullpen
             (rotation starters who aren't today's starter). Supplements the
@@ -186,11 +199,7 @@ def build_bullpen_policy_from_card(
         if is_rotation and not is_starter:
             continue
 
-        default_bf = 24
-        if workload_table and pid in workload_table:
-            bf = workload_table[pid]
-        else:
-            bf = default_bf
+        bf = _resolve_workload_bf(workload_table, pid) if is_starter else 0
 
         info = PitcherInfo(
             pitcher_id=pid,
@@ -198,7 +207,7 @@ def build_bullpen_policy_from_card(
             throws=pr.get("throws", "R"),
             is_starter=is_starter,
             team=team,
-            workload_bf=bf if is_starter else 0,
+            workload_bf=bf,
         )
 
         if team == home_team:
@@ -217,53 +226,62 @@ def build_bullpen_policy_from_card(
 def build_pitcher_workload(
     raw_dir: str = "data/raw",
     seasons: list[int] | None = None,
-    decay_halflife_starts: int = 5,
+    decay_halflife: int = 10,
 ) -> dict[int, int]:
-    """Compute recency-weighted typical batters-faced-per-start for each pitcher.
+    """Compute recency-weighted BF across all appearances (starts + relief).
 
-    Uses exponential decay weighting (recent starts count more). Returns
-    {pitcher_id: rounded BF/start}, clamped to [18, 30].
+    A single recency-weighted average naturally handles:
+    - Pure starters: all appearances are long → high BF
+    - Pure relievers: all appearances are short → low BF
+    - Swing pitchers: recent role dominates via decay weighting
+    - Brief bullpen stints: old short outings wash out if followed by starts
+
+    Spring training (before April) is excluded.
+    Returns {pitcher_id: rounded BF}, clamped to [3, 30].
     """
     from pathlib import Path
 
     if seasons is None:
-        seasons = list(range(2021, 2024))
+        seasons = list(range(2021, 2027))
 
-    all_starts: list[dict] = []
+    all_appearances: list[dict] = []
 
     for season in seasons:
         season_dir = Path(raw_dir) / str(season)
         if not season_dir.exists():
             continue
         for pq in sorted(season_dir.glob("*.parquet")):
-            df = pd.read_parquet(pq, columns=["game_pk", "pitcher", "at_bat_number", "inning", "events"])
+            df = pd.read_parquet(pq, columns=[
+                "game_pk", "game_date", "pitcher", "events",
+            ])
             pa_df = df[df["events"].notna()].copy()
             if pa_df.empty:
                 continue
-            # Find starters: the pitcher who threw the first pitch of the game for each team
-            first_ab = pa_df.sort_values("at_bat_number").groupby("game_pk").first()
-            starters = set(zip(first_ab.index, first_ab["pitcher"]))
+            pa_df["game_date"] = pd.to_datetime(pa_df["game_date"])
+            pa_df = pa_df[pa_df["game_date"].dt.month >= 4]
+            if pa_df.empty:
+                continue
 
-            for (gk, pid) in starters:
-                game_pas = pa_df[(pa_df["game_pk"] == gk) & (pa_df["pitcher"] == pid)]
-                bf = len(game_pas)
-                all_starts.append({"pitcher_id": int(pid), "game_pk": int(gk), "bf": bf})
+            for (gk, pid), gdf in pa_df.groupby(["game_pk", "pitcher"]):
+                all_appearances.append({
+                    "pitcher_id": int(pid), "game_pk": int(gk), "bf": len(gdf),
+                })
 
-    if not all_starts:
+    if not all_appearances:
         return {}
 
-    starts_df = pd.DataFrame(all_starts)
-    starts_df = starts_df.sort_values(["pitcher_id", "game_pk"]).reset_index(drop=True)
+    app_df = pd.DataFrame(all_appearances)
+    app_df = app_df.sort_values(["pitcher_id", "game_pk"]).reset_index(drop=True)
 
-    decay = np.log(2) / decay_halflife_starts
-    result = {}
-    for pid, grp in starts_df.groupby("pitcher_id"):
+    decay = np.log(2) / decay_halflife
+    result: dict[int, int] = {}
+    for pid, grp in app_df.groupby("pitcher_id"):
         bfs = grp["bf"].values
         n = len(bfs)
-        if n < 3:
+        if n < 5:
             continue
         weights = np.exp(-decay * np.arange(n - 1, -1, -1))
         weighted_bf = np.average(bfs, weights=weights)
-        result[int(pid)] = int(np.clip(round(weighted_bf), 18, 30))
+        result[int(pid)] = int(np.clip(round(weighted_bf), 3, 30))
 
     return result
