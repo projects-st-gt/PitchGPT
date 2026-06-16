@@ -359,3 +359,95 @@ class ABContextResponse(BaseModel):
     runner_on_2b: bool = False
     runner_on_3b: bool = False
     batting_team: Optional[str] = None     # which abbr is at bat (home or away)
+
+
+# ============================================================
+# Recommender — POST /recommend
+# ============================================================
+
+
+class RecommendRequest(BaseModel):
+    """Ask: 'given this AB state, what should the pitcher throw next?'
+
+    The recommender ranks the candidate pitch types by expected run value
+    (lower = better for the pitcher) and refuses candidates whose propensity
+    is below the trust threshold. Mirrors :class:`QueryRequest` for the
+    common fields; the differences are: no fixed intervention type (the
+    recommender evaluates ALL candidates), optional candidate-set
+    restriction, and tunable positivity thresholds.
+    """
+
+    game_pk: int = Field(..., description="MLB Statcast game_pk identifier")
+    at_bat_number: int = Field(..., ge=1, description="AB number within the game")
+    intervention_position: int = Field(
+        ..., ge=1,
+        description=(
+            "Pitch index (0-based) at which to recommend. Must be ≥ 1 — the "
+            "model does not autoregressively predict pitch[0] from no history."
+        ),
+    )
+    n_paths: int = Field(
+        200, ge=10, le=2000,
+        description=(
+            "Monte Carlo rollout paths per candidate. With ~7 candidates and "
+            "n_paths=200, expect ~60 s wallclock on CPU."
+        ),
+    )
+    candidates: Optional[list[str]] = Field(
+        None,
+        description=(
+            "Subset of pitch types to evaluate. None = all 7 (FF, SI, FC, SL, "
+            "CU, CH, FS). No arsenal pre-filter — the positivity gate is the "
+            "gatekeeper (per recommender brainstorm decision D4)."
+        ),
+    )
+    tau_refuse: Optional[float] = Field(
+        None, gt=0, lt=1,
+        description="Override for the positivity-refuse threshold (default 0.01).",
+    )
+    tau_green: Optional[float] = Field(
+        None, gt=0, lt=1,
+        description="Override for the positivity-green threshold (default 0.05).",
+    )
+
+
+class CandidateRecommendation(BaseModel):
+    """One candidate's full diagnostic row.
+
+    For *refused* candidates (``trust_state=='red'``), the rollout-derived
+    fields (``mean_run_value``, ``ci_*``, ``effect_vs_observed``, E-values,
+    ``ab_outcome_dist``, ``rank``) are ``None`` — no rollout was run.
+    """
+
+    pitch_type: str                       # one of PITCH_TYPES
+    p_hat: float                          # π̂(type | history before intervention)
+    trust_state: Literal["green", "yellow", "red"]
+    rationale: str
+    rank: Optional[int] = None            # 0-based rank in the ranked list; None for refused
+
+    mean_run_value: Optional[float] = None  # E[Y | do(type=a)], lower = better for pitcher
+    se_run_value: Optional[float] = None
+    ci_lower: Optional[float] = None      # 95% CI
+    ci_upper: Optional[float] = None
+    n_truncated: Optional[int] = None
+
+    # Populated when the observed pitch at the intervention position is in-support.
+    # effect = mean_run_value(candidate) − mean_run_value(observed); negative = better.
+    effect_vs_observed: Optional[float] = None
+    e_value_point: Optional[float] = None
+    e_value_ci_limit: Optional[float] = None
+    is_tossup: bool = False               # CI overlaps with the #1 in-support candidate
+
+    # Per-candidate AB-outcome distribution at terminal pitch under do(type=a)
+    ab_outcome_dist: Optional[dict[str, float]] = None
+
+
+class RecommendResponse(BaseModel):
+    """Result envelope for POST /recommend."""
+
+    ranked: list[CandidateRecommendation]    # in-support candidates, sorted by mean_run_value asc
+    refused: list[CandidateRecommendation]   # red-gate candidates (no rollout run)
+    intervention_position: int
+    observed_type_at_position: Optional[str] = None
+    n_paths: int
+    timing_seconds: float
