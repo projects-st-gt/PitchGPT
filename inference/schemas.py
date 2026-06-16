@@ -27,11 +27,10 @@ class QueryRequest(BaseModel):
     game_pk: int = Field(..., description="MLB Statcast game_pk identifier")
     at_bat_number: int = Field(..., ge=1, description="AB number within the game")
     intervention_position: int = Field(
-        ..., ge=1,
+        ..., ge=0,
         description=(
             "Pitch index (0-based) where we counterfactually substitute the "
-            "type. Must be ≥ 1 — the model does not autoregressively predict "
-            "pitch[0] from no history."
+            "type. V2 model can predict at position 0 (from the start token)."
         ),
     )
     intervention_type: str = Field(

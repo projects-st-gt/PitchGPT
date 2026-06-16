@@ -33,16 +33,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from causal.g_computation import (
     AB_OUTCOME_NAMES,
     DEFAULT_AB_RUN_VALUE,
-    g_compute,
 )
-from causal.nuisance import NuisanceModels, build_single_ab_batch
+from causal.g_computation_v2 import g_compute_v2
+from causal.nuisance_v2 import NuisanceModelsV2, build_single_ab_batch_v2
+from hitter.rollout import load_hitter_ctx, build_cell_step_fn
 from causal.positivity import (
-    GateDecision,
     PositivityGate,
     TAU_SINGLE_STEP,
     TAU_GREEN,
-    TAU_ZONE_REFUSE,
-    TAU_ZONE_GREEN,
     TrustState,
 )
 from causal.sensitivity import e_value_for_continuous_effect
@@ -85,7 +83,7 @@ from model.pitchgpt_dataset import classify_ab_outcome, AB_OUTCOME_IGNORE
 # App + state
 # ============================================================
 
-DEFAULT_CHECKPOINT = Path("checkpoints_modal/tiny-fold0-v6/checkpoint_calibrated.pt")
+DEFAULT_CHECKPOINT = Path("checkpoints_modal/releases/tiny-v1c1-sax-cal-20260611.pt")
 DEFAULT_AUGMENTED_DIR = Path("data/augmented")
 DEFAULT_VAL_GLOB = "2024/2024-*.parquet"  # MVP: serve from val 2024 H1
 
@@ -104,20 +102,29 @@ OFF_MODEL_PROB_FLOOR = 0.10
 
 
 class AppState:
-    """Lazy-loaded heavy artifacts (model + val data + game-teams lookup)."""
+    """Lazy-loaded heavy artifacts (model + val data + hitter cascade + game-teams lookup)."""
 
-    nuisance: Optional[NuisanceModels] = None
+    nuisance: Optional[NuisanceModelsV2] = None
+    hitter_ctx: Optional[dict] = None
     val_pitches: Optional[pd.DataFrame] = None
     val_ab_keys: Optional[list[tuple[int, int]]] = None
     game_teams: Optional[dict[int, tuple[str, str]]] = None  # game_pk → (home, away)
 
     @classmethod
-    def get_nuisance(cls) -> NuisanceModels:
+    def get_nuisance(cls) -> NuisanceModelsV2:
         if cls.nuisance is None:
-            print(f"[api] loading nuisance from {DEFAULT_CHECKPOINT}...")
-            cls.nuisance = NuisanceModels(DEFAULT_CHECKPOINT, device="cpu")
+            print(f"[api] loading nuisance V2 from {DEFAULT_CHECKPOINT}...")
+            cls.nuisance = NuisanceModelsV2(DEFAULT_CHECKPOINT, device="cpu")
             print(f"[api] loaded: {cls.nuisance}")
         return cls.nuisance
+
+    @classmethod
+    def get_hitter_ctx(cls) -> dict:
+        if cls.hitter_ctx is None:
+            print("[api] loading hitter cascade...")
+            cls.hitter_ctx = load_hitter_ctx(fold_id=0)
+            print("[api] hitter cascade loaded")
+        return cls.hitter_ctx
 
     @classmethod
     def get_game_teams(cls) -> dict[int, tuple[str, str]]:
@@ -233,42 +240,34 @@ def _build_observed_ab(ab: pd.DataFrame) -> ObservedAB:
 
 
 def _baseline_expected_distribution(
-    nuisance: NuisanceModels, ab: pd.DataFrame, intervention_position: int
-) -> tuple[ExpectedDistribution, np.ndarray, np.ndarray, float]:
+    nuisance: NuisanceModelsV2, ab: pd.DataFrame, intervention_position: int
+) -> tuple[ExpectedDistribution, np.ndarray]:
     """One forward pass for the baseline (no intervention).
 
     Returns:
-        - ExpectedDistribution: π̂ at position k and the AB-outcome's expected runs.
+        - ExpectedDistribution: π̂ at position k (V2 has no ab_outcome head).
         - type_probs: (N_PITCH_TYPES,) numpy — for the gate check.
-        - zone_probs: (13,) numpy — for joint positivity if a zone intervention is set.
-        - baseline_run_value: scalar mean run value under the natural model.
     """
-    batch = build_single_ab_batch(nuisance, ab, n_replicates=1)
+    batch = build_single_ab_batch_v2(nuisance, ab, n_replicates=1)
     out = nuisance.forward(batch)
     k = intervention_position
 
-    # π̂ at the position predicting pitch k.
-    NC = nuisance.model.N_CONTEXT_TOKENS
-    pi_type = out.propensity_probs["type"][
-        0, NC + (k - 1), MODEL_PITCH_TYPES_START_IDX:MODEL_PITCH_TYPES_END_IDX
+    # V2: type_logits at position k predicts pitch k (0-indexed). No NC offset.
+    count_at_k = batch["count_state"][:, k + 1]  # count of the predicted pitch
+    logits = nuisance.scale_type_logits(
+        out["type_logits"][:, k, :],  # (1, 8)
+        count_ids=count_at_k,         # (1,)
+    )
+    logits[:, 0] = -1e9  # mask PAD
+    pi_type = torch.softmax(logits, dim=-1)[
+        0, MODEL_PITCH_TYPES_START_IDX:MODEL_PITCH_TYPES_END_IDX
     ].numpy().astype(np.float64)
     pi_type = pi_type / pi_type.sum().clip(min=1e-12)
 
-    # Zone propensity at the same sequence position. The zone head's vocab is 13
-    # under v5 (SIS 14-zone: 9 in-zone + 4 OOZ quadrants) — no PAD offset, sliced
-    # directly. Internal indices: 0..8 = in-zone 3x3 (top-left to bottom-right),
-    # 9..12 = OOZ quadrants (UL, UR, LL, LR per the SIS_TO_INTERNAL map).
-    pi_zone = out.propensity_probs["zone"][0, NC + (k - 1), :].numpy().astype(np.float64)
-    pi_zone = pi_zone / pi_zone.sum().clip(min=1e-12)
-
-    # μ̂ baseline: AB-outcome head at the last observed position, dotted with run values.
-    ab_probs = out.ab_outcome_probs[0, -1, :].numpy().astype(np.float64)
-    baseline_run_value = float((ab_probs * RUN_VALUE_TABLE).sum())
-
     return ExpectedDistribution(
         pitch_type_probs={pt: float(pi_type[i]) for i, pt in enumerate(PITCH_TYPES)},
-        expected_ab_run_value=baseline_run_value,
-    ), pi_type, pi_zone, baseline_run_value
+        expected_ab_run_value=0.0,
+    ), pi_type
 
 
 def _outcome_dist_to_dict(arr: np.ndarray) -> dict[str, float]:
@@ -436,64 +435,93 @@ def ab_context(game_pk: int, at_bat_number: int) -> ABContextResponse:
     pitcher_throws = str(ab.iloc[0].get("p_throws") or "")
     batter_stand = str(ab.iloc[0].get("stand") or "")
 
-    # Forward through the model ONCE, on the full observed AB.
-    batch = build_single_ab_batch(nuisance, ab, n_replicates=1)
+    # Forward through V2 model ONCE, on the full observed AB.
+    batch = build_single_ab_batch_v2(nuisance, ab, n_replicates=1)
     out = nuisance.forward(batch)
-    NC = nuisance.model.N_CONTEXT_TOKENS
 
-    # Per-position expected distributions. Position k's expected pitch comes
-    # from propensity at seq_idx = NC + (k - 1), which predicts pitch k given
-    # history through pitch k-1. For k=0 (the first pitch), there's no
-    # "history through pitch -1" — set to None.
+    # Batch-compute type probs for all pitches. V2: type_logits at position k
+    # predicts pitch k (0-indexed). No context-token offset.
+    n_pitches = len(ab)
+    logits_all = nuisance.scale_type_logits(
+        out["type_logits"][:, :n_pitches, :],             # (1, T, 8)
+        count_ids=batch["count_state"][:, 1:n_pitches+1], # (1, T) count of each predicted pitch
+    )
+    logits_all[:, :, 0] = -1e9  # mask PAD
+    probs_all = torch.softmax(logits_all, dim=-1)[
+        0, :, MODEL_PITCH_TYPES_START_IDX:MODEL_PITCH_TYPES_END_IDX
+    ]  # (T, 7)
+    probs_all = probs_all / probs_all.sum(dim=-1, keepdim=True).clamp_min(1e-12)
+    probs_np = probs_all.numpy().astype(np.float64)
+
+    # Build cascade step function for result probs (V2 has no result head).
+    hitter_ctx = AppState.get_hitter_ctx()
+    stand_for_cascade = batter_stand if batter_stand and batter_stand not in ("nan", "") else None
+    throws_for_cascade = pitcher_throws if pitcher_throws and pitcher_throws not in ("nan", "") else None
+    if not stand_for_cascade:
+        sid = int(ab.iloc[0].get("stand_id", 1)) if pd.notna(ab.iloc[0].get("stand_id")) else 1
+        stand_for_cascade = "R" if sid == 1 else "L"
+    if not throws_for_cascade:
+        pid = int(ab.iloc[0].get("p_throws_id", 1)) if pd.notna(ab.iloc[0].get("p_throws_id")) else 1
+        throws_for_cascade = "R" if pid == 1 else "L"
+    step_fn = build_cell_step_fn(
+        hitter_ctx,
+        pitcher_id=pitcher_id, batter_id=batter_id,
+        stand=stand_for_cascade, throws=throws_for_cascade,
+        game_date=str(ab.iloc[0]["game_date"])[:10],
+    )
+
     positions: list[PositionInfo] = []
-    for k in range(len(ab)):
+    for k in range(n_pitches):
         row = ab.iloc[k]
         type_id_1 = int(row["type_id"])
         pt = PITCH_TYPES[type_id_1 - 1] if type_id_1 > 0 else "PAD"
 
-        expected_type_probs: Optional[dict[str, float]] = None
-        expected_zone_probs: Optional[list[float]] = None
-        expected_run_value: Optional[float] = None
-        model_confidence: Optional[float] = None
+        # Type probs available for ALL k in V2 (including k=0).
+        pi_type = probs_np[k]
+        expected_type_probs = {p: float(pi_type[i]) for i, p in enumerate(PITCH_TYPES)}
+
+        model_confidence = float(pi_type.max())
+        position_entropy = float(-(pi_type * np.log2(np.clip(pi_type, 1e-12, None))).sum())
         actual_pitch_surprisal: Optional[float] = None
-        position_entropy: Optional[float] = None
         is_surprising: Optional[bool] = None
+        if pt in PITCH_TYPES:
+            p_actual = float(pi_type[PITCH_TYPES.index(pt)])
+            actual_pitch_surprisal = float(-np.log2(max(p_actual, 1e-12)))
+            is_surprising = p_actual < OFF_MODEL_PROB_FLOOR
 
-        if k >= 1:
-            seq_idx = NC + (k - 1)
-            pi_type = out.propensity_probs["type"][
-                0, seq_idx, MODEL_PITCH_TYPES_START_IDX:MODEL_PITCH_TYPES_END_IDX
-            ].numpy().astype(np.float64)
-            pi_type = pi_type / pi_type.sum().clip(min=1e-12)
-            expected_type_probs = {p: float(pi_type[i]) for i, p in enumerate(PITCH_TYPES)}
+        # Cascade result probs for this observed pitch.
+        expected_result_probs: Optional[dict[str, float]] = None
+        try:
+            tid_arr = np.array([type_id_1])
+            zid_arr = np.array([int(row["feature_zone"])])
+            b_arr = np.array([int(row["balls"])])
+            s_arr = np.array([int(row["strikes"])])
+            prev_tid = np.array([int(ab.iloc[k-1]["type_id"])]) if k > 0 else np.array([0])
+            prev_zid = np.array([int(ab.iloc[k-1]["feature_zone"])]) if k > 0 else np.array([-1])
+            step_kw: dict = {}
+            for col, key in [("plate_x", "plate_x"), ("plate_z", "plate_z"),
+                              ("release_speed", "velo_native"), ("release_spin_rate", "spin_native")]:
+                if col in row.index and pd.notna(row[col]):
+                    step_kw[key] = np.array([float(row[col])])
+            if k > 0:
+                pr = ab.iloc[k-1]
+                if "release_speed" in pr.index and pd.notna(pr["release_speed"]):
+                    step_kw["prev_velo"] = np.array([float(pr["release_speed"])])
+                if "plate_x" in pr.index and pd.notna(pr["plate_x"]):
+                    step_kw["prev_plate_x"] = np.array([float(pr["plate_x"])])
+                if "plate_z" in pr.index and pd.notna(pr["plate_z"]):
+                    step_kw["prev_plate_z"] = np.array([float(pr["plate_z"])])
+            for sa_col in ("spin_axis_sin", "spin_axis_cos"):
+                if sa_col in row.index and pd.notna(row[sa_col]):
+                    step_kw[sa_col] = np.array([float(row[sa_col])])
+            rp, _ = step_fn(tid_arr, zid_arr, b_arr, s_arr, prev_tid, prev_zid,
+                            np.array([k]), **step_kw)
+            expected_result_probs = {
+                RESULT_CLASSES[i]: float(rp[0, i]) for i in range(len(RESULT_CLASSES))
+            }
+        except Exception:
+            pass
 
-            pi_zone = out.propensity_probs["zone"][0, seq_idx, :].numpy().astype(np.float64)
-            pi_zone = pi_zone / pi_zone.sum().clip(min=1e-12)
-            expected_zone_probs = [float(z) for z in pi_zone]
-
-            # AB-outcome head's expected run value if the AB ended at pitch k
-            ab_probs = out.ab_outcome_probs[0, k, :].numpy().astype(np.float64)
-            expected_run_value = float((ab_probs * RUN_VALUE_TABLE).sum())
-
-            # Confidence / surprisal / entropy over the pitch-type distribution.
-            # Surprisal and entropy (bits) are kept as displayed context. The
-            # off-model flag itself uses the fixed OFF_MODEL_PROB_FLOOR.
-            model_confidence = float(pi_type.max())
-            position_entropy = float(-(pi_type * np.log2(np.clip(pi_type, 1e-12, None))).sum())
-            if pt in PITCH_TYPES:
-                p_actual = float(pi_type[PITCH_TYPES.index(pt)])
-                actual_pitch_surprisal = float(-np.log2(max(p_actual, 1e-12)))
-                is_surprising = p_actual < OFF_MODEL_PROB_FLOOR
-
-        # Result-head prediction for this pitch — available for ALL k. The
-        # result head reads the pitch's own intended action; no history needed.
-        result_probs_k = out.result_probs[0, k, :].numpy().astype(np.float64)
-        result_probs_k = result_probs_k / result_probs_k.sum().clip(min=1e-12)
-        expected_result_probs = {
-            RESULT_CLASSES[i]: float(result_probs_k[i]) for i in range(len(RESULT_CLASSES))
-        }
-        # Observed result class. result_id in the parquet is 1-indexed
-        # (PAD=0, RESULT_CLASSES at 1..7); shift by -1 to name it.
         result_id_1 = int(row["result_id"]) if pd.notna(row.get("result_id")) else 0
         actual_result = (
             RESULT_CLASSES[result_id_1 - 1] if 1 <= result_id_1 <= len(RESULT_CLASSES) else None
@@ -510,8 +538,8 @@ def ab_context(game_pk: int, at_bat_number: int) -> ABContextResponse:
             count_before=_format_count(int(row["balls"]), int(row["strikes"])),
             description=str(row["description"]) if pd.notna(row["description"]) else "",
             expected_pitch_type_probs=expected_type_probs,
-            expected_zone_probs=expected_zone_probs,
-            expected_ab_run_value=expected_run_value,
+            expected_zone_probs=None,
+            expected_ab_run_value=None,
             expected_result_probs=expected_result_probs,
             actual_result=actual_result,
             model_confidence=model_confidence,
@@ -637,84 +665,58 @@ def query(req: QueryRequest) -> QueryResponse:
             status_code=400,
             detail=(
                 f"intervention_position {req.intervention_position} ≥ AB length {len(ab)}; "
-                f"pick an earlier position (must be in [1, {len(ab)})"
+                f"pick an earlier position (must be in [0, {len(ab)}))"
             ),
         )
 
     observed = _build_observed_ab(ab)
-    expected, pi_type_arr, pi_zone_arr, baseline_run_value = _baseline_expected_distribution(
+    expected, pi_type_arr = _baseline_expected_distribution(
         nuisance, ab, req.intervention_position
     )
 
-    # Positivity gate — when zone is set, we require BOTH π̂(type) AND π̂(zone)
-    # to independently clear their respective τ. Type and zone get DIFFERENT
-    # thresholds because they have different cardinalities (type=7 cells,
-    # zone=13 cells under v5 SIS 14-zone). With fewer cells, per-cell marginals
-    # are larger (~7% vs the old ~3-4%), so the existing zone-dimension
-    # thresholds may admit more queries than under v1 — re-tune after retrain
-    # if the gauge looks too permissive.
-    # The overall trust state is the WORSE of the two dimensions' states.
+    # Positivity gate — type-only (V2 has no discrete zone head).
     p_hat_type = float(pi_type_arr[MODEL_TYPE_ID[req.intervention_type] - MODEL_PITCH_TYPES_START_IDX])
     type_gate = PositivityGate(tau_refuse=TAU_SINGLE_STEP, tau_green=TAU_GREEN)
-    type_decision = type_gate.gate(p_hat_type)
-    if req.intervention_zone is not None:
-        p_hat_zone = float(pi_zone_arr[int(req.intervention_zone)])
-        zone_gate = PositivityGate(tau_refuse=TAU_ZONE_REFUSE, tau_green=TAU_ZONE_GREEN)
-        zone_decision = zone_gate.gate(p_hat_zone)
-        # Worst-of-two as the binding state. Order: green > yellow > red.
-        priority = {TrustState.GREEN: 2, TrustState.YELLOW: 1, TrustState.RED: 0}
-        if priority[type_decision.state] <= priority[zone_decision.state]:
-            decision = type_decision
-        else:
-            decision = zone_decision
-        # Compose a more informative rationale that names both dimensions.
-        decision = GateDecision(
-            state=decision.state,
-            p_hat=min(p_hat_type, p_hat_zone),
-            threshold=decision.threshold,
-            rationale=(
-                f"type π̂({req.intervention_type})={p_hat_type:.4f} "
-                f"(type τ_refuse={TAU_SINGLE_STEP}, τ_green={TAU_GREEN}); "
-                f"zone π̂(cell {req.intervention_zone})={p_hat_zone:.4f} "
-                f"(zone τ_refuse={TAU_ZONE_REFUSE}, τ_green={TAU_ZONE_GREEN}). "
-                f"Binding dimension is the worse of the two."
-            ),
-        )
-        p_hat = min(p_hat_type, p_hat_zone)
-    else:
-        p_hat_zone = None
-        p_hat = p_hat_type
-        decision = type_decision
+    decision = type_gate.gate(p_hat_type)
+    p_hat = p_hat_type
 
-    # Baseline rollout (intervention = observed type, optional observed zone at
-    # position k) — gives us a like-for-like baseline AB-length contrast.
-    observed_type_at_k = PITCH_TYPES[int(ab.iloc[req.intervention_position]["type_id"]) - 1]
-    observed_zone_at_k = (
-        int(ab.iloc[req.intervention_position]["feature_zone"])
-        if req.intervention_zone is not None
-        else None
+    # Build hitter cascade step function for this matchup.
+    hitter_ctx = AppState.get_hitter_ctx()
+    first = ab.iloc[0]
+    stand_val = str(first.get("stand") or "")
+    throws_val = str(first.get("p_throws") or "")
+    if not stand_val or stand_val in ("nan", "None"):
+        sid = int(first.get("stand_id", 1)) if pd.notna(first.get("stand_id")) else 1
+        stand_val = "R" if sid == 1 else "L"
+    if not throws_val or throws_val in ("nan", "None"):
+        pid = int(first.get("p_throws_id", 1)) if pd.notna(first.get("p_throws_id")) else 1
+        throws_val = "R" if pid == 1 else "L"
+    step_fn = build_cell_step_fn(
+        hitter_ctx,
+        pitcher_id=int(first["pitcher"]), batter_id=int(first["batter"]),
+        stand=stand_val, throws=throws_val,
+        game_date=str(first["game_date"])[:10],
     )
-    baseline_rollout = g_compute(
+
+    # Baseline rollout (intervention = observed type at position k).
+    observed_type_at_k = PITCH_TYPES[int(ab.iloc[req.intervention_position]["type_id"]) - 1]
+    baseline_rollout = g_compute_v2(
         nuisance, ab,
         intervention_position=req.intervention_position,
         intervention_type=observed_type_at_k,
-        intervention_zone=observed_zone_at_k,
         n_paths=req.n_paths, rng_seed=42,
+        hitter_step_fn=step_fn,
     )
 
     # Intervention rollout.
-    cf_rollout = g_compute(
+    cf_rollout = g_compute_v2(
         nuisance, ab,
         intervention_position=req.intervention_position,
         intervention_type=req.intervention_type,
-        intervention_zone=req.intervention_zone,
         n_paths=req.n_paths, rng_seed=42,
+        hitter_step_fn=step_fn,
     )
 
-    # Always compute the counterfactual. The rollout itself doesn't need
-    # positivity to produce numbers — it's just sampling from the trained
-    # model under do(A_k = a*). The trust_state controls how to LABEL the
-    # output (high-support / moderate / low-support), not whether to compute it.
     effect = cf_rollout.mean_run_value - baseline_rollout.mean_run_value
     se = float(np.sqrt(cf_rollout.se_run_value**2 + baseline_rollout.se_run_value**2))
     e_res = e_value_for_continuous_effect(effect, se, outcome_sd=OUTCOME_SD_PROXY)
@@ -740,17 +742,15 @@ def query(req: QueryRequest) -> QueryResponse:
         n_paths=cf_rollout.n_paths,
         n_truncated_paths=cf_rollout.n_truncated,
     )
-    # The refusal block is retained but now empty — kept as Optional[None] for
-    # API back-compat; the demo no longer renders it as a separate panel.
     refusal: Optional[RefusalInfo] = None
 
     return QueryResponse(
         trust_state=decision.state.value,
         p_hat_intervention=p_hat,
         p_hat_type=p_hat_type,
-        p_hat_zone=p_hat_zone,
+        p_hat_zone=None,
         intervention_type=req.intervention_type,
-        intervention_zone=req.intervention_zone,
+        intervention_zone=None,
         intervention_position=req.intervention_position,
         rationale=decision.rationale,
         observed_ab=observed,
