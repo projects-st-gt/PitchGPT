@@ -681,7 +681,7 @@ export default function ScorePredictionTab() {
   };
 
   return (
-    <div className="max-w-6xl mx-auto px-6 py-8">
+    <div className="max-w-6xl mx-auto px-3 sm:px-6 py-4 sm:py-8">
       <div className="text-section mb-1">Score predictions</div>
       <p className="text-body text-gray-500 mb-6">
         Full-game Monte Carlo simulation — 10,000 games per matchup using pitchGPT matchup

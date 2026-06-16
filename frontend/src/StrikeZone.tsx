@@ -164,25 +164,17 @@ export function StrikeZone({
             The figure's "front" (toward plate) is at x_local=90; "back" is at
             x_local=0 (with the bat extending further to negative x). */}
         {batterStand && (() => {
-          // Batter is ~2.5× the strike zone's height. Key anatomical anchors
-          // relative to the figure's local y coords (y=0 at top of helmet,
-          // FIG_H at cleats):
-          //   - 0           helmet top
-          //   - 70          shoulders (top of torso)
-          //   - 175         top of strike zone (chest / letters)  ← MUST align
-          //   - 360         bottom of strike zone (knees)         ← MUST align
-          //   - 540         cleats
-          // We pick FIG_H so that the in-zone vertical span (175→360 in local
-          // coords) matches SZ_H (240 in world coords). So scale=1 if FIG_H≈540
-          // and the zone top in local coords matches SZ_Y after translation.
-          const FIG_W = 100;
-          // CHEST aligned with the zone top. The knees are then ~75% down the
-          // figure's height, slightly above the zone bottom — which matches
-          // real MLB anatomy (the zone bottom is the *hollow* of the knee,
-          // slightly below the kneecap).
-          const CHEST_Y_LOCAL = 175;
-          const ty = SZ_Y - CHEST_Y_LOCAL;
-          const FRONT_GAP = 24;
+          // MLB-style compact batter silhouette. Anatomical anchors:
+          //   y=0    helmet top
+          //   y=110  chest/letters (zone top)
+          //   y=290  hollow of knee (zone bottom)
+          //   y=370  cleats
+          // Zone span 110→290 = 180 local units maps to SZ_H=240 world units.
+          const scale = SZ_H / 180;
+          const CHEST_Y_LOCAL = 110;
+          const ty = SZ_Y - CHEST_Y_LOCAL * scale;
+          const FRONT_GAP = 10;
+          const FIG_W = 80 * scale;
           const tx = isLHB
             ? SZ_X + SZ_W + FRONT_GAP + FIG_W
             : SZ_X - FRONT_GAP - FIG_W;
@@ -190,121 +182,43 @@ export function StrikeZone({
           const SIL = "#1f2937";
 
           return (
-            <g transform={`translate(${tx}, ${ty}) scale(${flip}, 1)`}>
-              {/* Bat — held back over the rear shoulder */}
-              <line
-                x1={28} y1={92}
-                x2={-36} y2={20}
-                stroke={SIL}
-                strokeWidth={6}
-                strokeLinecap="round"
-              />
-              <circle cx={-36} cy={20} r={5} fill={SIL} />
+            <g transform={`translate(${tx}, ${ty}) scale(${flip * scale}, ${scale})`}>
+              {/* Bat */}
+              <line x1={22} y1={58} x2={-20} y2={-10}
+                stroke={SIL} strokeWidth={4.5} strokeLinecap="round" />
+              <ellipse cx={-20} cy={-12} rx={4} ry={3.5} fill={SIL} />
 
-              {/* HELMET — large, well-defined, with brim toward plate */}
-              <ellipse cx={50} cy={32} rx={26} ry={28} fill={SIL} />
-              {/* Brim (forward-pointing) */}
-              <path d="M 70 38 L 90 36 L 90 44 L 72 46 Z" fill={SIL} />
-              {/* Earflap (visible on the plate side) */}
-              <ellipse cx={70} cy={48} rx={6} ry={9} fill={SIL} />
-              {/* Eye marker — small white dot for orientation cue */}
-              <circle cx={68} cy={28} r={1.8} fill="#f9fafb" opacity={0.8} />
+              {/* Helmet */}
+              <ellipse cx={44} cy={20} rx={20} ry={22} fill={SIL} />
+              <path d="M 58 26 Q 68 24 70 28 L 68 34 Q 60 36 58 32 Z" fill={SIL} />
+              <circle cx={58} cy={20} r={1.5} fill="#f9fafb" opacity={0.7} />
 
-              {/* NECK */}
-              <rect x={40} y={58} width={18} height={14} fill={SIL} />
+              {/* Neck */}
+              <path d="M 36 40 L 52 40 L 50 50 L 38 50 Z" fill={SIL} />
 
-              {/* SHOULDERS — wide horizontal bar before torso narrows */}
-              <ellipse cx={48} cy={78} rx={42} ry={12} fill={SIL} />
+              {/* Torso — athletic build, wider chest tapering to waist */}
+              <path d="M 10 54 Q 44 48 78 54 L 74 130 Q 44 134 18 130 Z" fill={SIL} />
 
-              {/* TORSO — trapezoidal, slight forward lean toward plate */}
-              <path
-                d="
-                  M 12 80
-                  L 84 80
-                  L 78 200
-                  L 18 200
-                  Z
-                "
-                fill={SIL}
-              />
+              {/* Back arm + hand on bat */}
+              <path d="M 14 58 Q 0 64 -8 56 Q -12 48 -4 40 L 4 44 Q -2 52 6 56 Z" fill={SIL} />
+              <path d="M -6 42 L -18 -6 L -12 -8 L -2 38 Z" fill={SIL} />
+              <ellipse cx={-14} cy={-4} rx={5} ry={4} fill={SIL} />
 
-              {/* BACK ARM — upper arm out, elbow bent, forearm to bat knob */}
-              <path
-                d="
-                  M 16 84
-                  Q -6 96 -22 84
-                  L -16 76
-                  Q 0 84 18 76
-                  Z
-                "
-                fill={SIL}
-              />
-              {/* Forearm continuing up to bat grip */}
-              <path
-                d="
-                  M -22 84
-                  L -36 22
-                  L -28 22
-                  L -14 80
-                  Z
-                "
-                fill={SIL}
-              />
-              {/* Back hand at grip */}
-              <ellipse cx={-30} cy={26} rx={6} ry={5} fill={SIL} />
+              {/* Front arm across body to grip */}
+              <path d="M 74 58 Q 64 76 46 68 Q 28 72 14 64 L 18 56 Q 32 64 46 60 Q 60 66 70 52 Z" fill={SIL} />
 
-              {/* FRONT ARM — wraps across torso to meet the back hand at grip */}
-              <path
-                d="
-                  M 80 84
-                  Q 70 110 50 92
-                  L 50 100
-                  Q 30 116 18 110
-                  L 22 100
-                  Q 50 108 76 90
-                  Z
-                "
-                fill={SIL}
-              />
+              {/* Belt/waist */}
+              <path d="M 20 128 L 72 128 L 70 142 L 22 142 Z" fill={SIL} />
 
-              {/* HIPS — narrow rect, slight forward tilt */}
-              <path
-                d="M 20 200 L 78 200 L 72 230 L 24 230 Z"
-                fill={SIL}
-              />
+              {/* Front leg — slightly open stance, athletic */}
+              <path d="M 48 142 Q 56 200 58 260 Q 58 300 62 360 L 76 362 Q 74 300 72 260 Q 72 200 68 142 Z" fill={SIL} />
 
-              {/* FRONT LEG — slightly bent, planted forward */}
-              <path
-                d="
-                  M 50 230
-                  Q 58 290 56 380
-                  Q 56 460 60 530
-                  L 78 530
-                  Q 80 460 78 380
-                  Q 82 290 72 230
-                  Z
-                "
-                fill={SIL}
-              />
+              {/* Back leg — weight loaded */}
+              <path d="M 22 142 Q 16 200 18 260 Q 18 300 20 360 L 36 362 Q 38 300 38 260 Q 40 200 42 142 Z" fill={SIL} />
 
-              {/* BACK LEG — bent more, weight on it */}
-              <path
-                d="
-                  M 24 230
-                  Q 16 290 18 380
-                  Q 18 460 22 530
-                  L 40 530
-                  Q 44 460 42 380
-                  Q 46 290 46 230
-                  Z
-                "
-                fill={SIL}
-              />
-
-              {/* CLEATS — visible at the ground line */}
-              <ellipse cx={68} cy={538} rx={16} ry={5} fill={SIL} />
-              <ellipse cx={32} cy={538} rx={16} ry={5} fill={SIL} />
-
+              {/* Cleats */}
+              <ellipse cx={68} cy={366} rx={14} ry={4.5} fill={SIL} />
+              <ellipse cx={28} cy={366} rx={14} ry={4.5} fill={SIL} />
             </g>
           );
         })()}

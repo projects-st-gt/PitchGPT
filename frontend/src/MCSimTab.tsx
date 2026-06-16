@@ -75,24 +75,24 @@ function CellButton({
       onClick={onClick}
       style={{ backgroundColor: opsTint(ops) }}
       className={[
-        "relative w-full h-[68px] px-1.5 py-1 flex flex-col items-center justify-center gap-0.5 border-r border-b border-gray-100 transition-state tabular-nums leading-none",
+        "relative w-full h-[56px] sm:h-[68px] px-1 sm:px-1.5 py-0.5 sm:py-1 flex flex-col items-center justify-center gap-0 sm:gap-0.5 border-r border-b border-gray-100 transition-state tabular-nums leading-none",
         selected ? "ring-2 ring-accent ring-inset" : "hover:brightness-95",
       ].join(" ")}
       title={`${cell.batter_name}: AVG ${fmt3(s.avg)} OPS ${fmt3(s.ops)} BB ${pct(s.bb)} K ${pct(s.k)}`}
     >
-      <span className="text-small font-medium text-gray-900">{fmt3(s.avg)}</span>
-      <span className="text-[13px] font-semibold text-gray-900">{fmt3(s.ops)}</span>
-      <span className="text-[10px] text-gray-500">
+      <span className="text-[11px] sm:text-small font-medium text-gray-900">{fmt3(s.avg)}</span>
+      <span className="text-[11px] sm:text-[13px] font-semibold text-gray-900">{fmt3(s.ops)}</span>
+      <span className="text-[8px] sm:text-[10px] text-gray-500">
         BB {pct(s.bb)} · K {pct(s.k)}
       </span>
-      <span className="flex items-center gap-1">
+      <span className="flex items-center gap-0.5 sm:gap-1">
         <PitchGlyph type={cell.modal_type as PitchType} dim />
         {acted ? (
           <span className="flex gap-0.5">
             {acted.events.slice(0, 4).map((e, i) => (
               <span
                 key={i}
-                className="inline-block w-1.5 h-1.5 rounded-full"
+                className="inline-block w-1 h-1 sm:w-1.5 sm:h-1.5 rounded-full"
                 style={{
                   backgroundColor: reachedBase(e.event_type) ? "#FF6B35" : "#86868B",
                 }}
@@ -125,13 +125,13 @@ function StaffGrid({
         <table className="border-collapse w-full">
           <thead>
             <tr>
-              <th className="sticky left-0 z-10 bg-white text-left text-small font-medium text-gray-500 px-3 py-2 border-r border-b border-gray-200">
+              <th className="sticky left-0 z-10 bg-white text-left text-[11px] sm:text-small font-medium text-gray-500 px-2 sm:px-3 py-1.5 sm:py-2 border-r border-b border-gray-200">
                 Pitcher
               </th>
               {hitters.map((h, i) => (
                 <th
                   key={i}
-                  className="text-small font-medium text-gray-500 px-2 py-2 border-r border-b border-gray-200 whitespace-nowrap min-w-[112px]"
+                  className="text-[11px] sm:text-small font-medium text-gray-500 px-1 sm:px-2 py-1.5 sm:py-2 border-r border-b border-gray-200 whitespace-nowrap min-w-[88px] sm:min-w-[112px]"
                 >
                   {h}
                 </th>
@@ -141,7 +141,7 @@ function StaffGrid({
           <tbody>
             {rows.map((row) => (
               <tr key={row.pitcher_id}>
-                <td className="sticky left-0 z-10 bg-white text-small text-gray-900 px-3 py-1 border-r border-b border-gray-100 whitespace-nowrap">
+                <td className="sticky left-0 z-10 bg-white text-[11px] sm:text-small text-gray-900 px-2 sm:px-3 py-1 border-r border-b border-gray-100 whitespace-nowrap">
                   {row.is_starter ? <span className="text-accent mr-1">★</span> : null}
                   {row.name}
                   <span className="text-gray-400 ml-1">{row.throws}HP</span>
@@ -149,7 +149,7 @@ function StaffGrid({
                 {row.cells.map((cell) => {
                   const key = `${row.pitcher_id}:${cell.batter_id}`;
                   return (
-                    <td key={cell.batter_id} className="p-0 min-w-[112px]">
+                    <td key={cell.batter_id} className="p-0 min-w-[88px] sm:min-w-[112px]">
                       <CellButton
                         cell={cell}
                         selected={selectedKey === key}
@@ -289,7 +289,7 @@ export default function MCSimTab() {
   const selectedKey = sel ? `${sel.row.pitcher_id}:${sel.cell.batter_id}` : null;
 
   return (
-    <div className="w-full px-6 py-8">
+    <div className="w-full px-3 sm:px-6 py-4 sm:py-8">
       <div className="text-section mb-1">Matchup cards</div>
       <p className="text-body text-gray-500 mb-4">
         Pre-game scouting grid — every rostered pitcher against every opposing hitter, in a

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getABContext, listAtBats, listGames, postQuery } from "./api";
 import MCSimTab from "./MCSimTab";
 import PitcherProfileTab from "./PitcherProfileTab";
@@ -410,7 +410,7 @@ function OutcomeDistribution({
   highlight?: boolean;
 }) {
   return (
-    <div className="grid grid-cols-7 gap-2">
+    <div className="grid grid-cols-4 sm:grid-cols-7 gap-1.5 sm:gap-2">
       {AB_OUTCOMES.map((o) => {
         const v = dist[o] ?? 0;
         const vb = baselineDist?.[o] ?? null;
@@ -734,7 +734,7 @@ function CounterfactualExplorer() {
   }
 
   return (
-    <div className="max-w-6xl mx-auto px-6 py-16">
+    <div className="max-w-6xl mx-auto px-3 sm:px-6 py-6 sm:py-16">
       <header className="mb-12">
         <div className="text-small font-medium text-gray-500 uppercase tracking-wide mb-2">
           PitchGPT — counterfactual pitch strategy
@@ -885,28 +885,51 @@ function TabSwitcher({ tab, onChange }: { tab: TopTab; onChange: (t: TopTab) => 
     { id: "mcsim", label: "Matchup cards" },
     { id: "score_prediction", label: "Score predictions" },
   ];
+  const [showFade, setShowFade] = useState(true);
+  const checkFade = useCallback((el: HTMLElement | null) => {
+    if (!el) return;
+    setShowFade(el.scrollLeft + el.clientWidth < el.scrollWidth - 8);
+  }, []);
+  const navRef = useRef<HTMLElement | null>(null);
   return (
-    <nav className="border-b border-gray-200 mb-8">
-      <div className="max-w-6xl mx-auto px-6 flex gap-2">
-        {tabs.map((t) => {
-          const active = t.id === tab;
-          return (
-            <button
-              key={t.id}
-              onClick={() => onChange(t.id)}
-              className={[
-                "px-4 py-3 text-body font-medium transition-state border-b-2",
-                active
-                  ? "text-gray-900 border-accent"
-                  : "text-gray-500 border-transparent hover:text-gray-900",
-              ].join(" ")}
-            >
-              {t.label}
-            </button>
-          );
-        })}
-      </div>
-    </nav>
+    <div className="relative mb-8">
+      <nav
+        className="border-b border-gray-200 overflow-x-auto"
+        style={{ scrollbarWidth: "none" }}
+        ref={(el) => { navRef.current = el; checkFade(el); }}
+        onScroll={(e) => checkFade(e.currentTarget)}
+      >
+        <div className="max-w-6xl mx-auto px-3 sm:px-6 flex gap-1 sm:gap-2 min-w-max">
+          {tabs.map((t) => {
+            const active = t.id === tab;
+            return (
+              <button
+                key={t.id}
+                onClick={() => onChange(t.id)}
+                className={[
+                  "px-2.5 sm:px-4 py-3 text-xs sm:text-body font-medium transition-state border-b-2 whitespace-nowrap",
+                  active
+                    ? "text-gray-900 border-accent"
+                    : "text-gray-500 border-transparent hover:text-gray-900",
+                ].join(" ")}
+              >
+                {t.label}
+              </button>
+            );
+          })}
+        </div>
+      </nav>
+      {showFade && (
+        <div
+          className="pointer-events-none absolute right-0 top-0 bottom-0 w-10 sm:hidden flex items-center justify-end pr-1"
+          style={{ background: "linear-gradient(to right, rgba(255,255,255,0), white 70%)" }}
+        >
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" className="text-gray-400">
+            <path d="M6 3l5 5-5 5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+          </svg>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -917,12 +940,12 @@ export default function App() {
       <TabSwitcher tab={tab} onChange={setTab} />
       {tab === "counterfactual" && <CounterfactualExplorer />}
       {tab === "rollout_viewer" && (
-        <div className="max-w-6xl mx-auto px-6 py-8">
+        <div className="max-w-6xl mx-auto px-3 sm:px-6 py-4 sm:py-8">
           <RolloutViewerTab />
         </div>
       )}
       {tab === "pitcher_profile" && (
-        <div className="max-w-6xl mx-auto px-6 py-8">
+        <div className="max-w-6xl mx-auto px-3 sm:px-6 py-4 sm:py-8">
           <PitcherProfileTab />
         </div>
       )}
