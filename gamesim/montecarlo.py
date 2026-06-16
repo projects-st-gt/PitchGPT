@@ -287,6 +287,7 @@ def simulate_from_card(
     team_quality_table: dict[str, float] | None = None,
     thin_profile_ids: set[int] | None = None,
     apply_hfa: bool = True,
+    calibration_factors: dict[str, float] | None = None,
 ) -> GameSimResult:
     """Convenience: simulate a game directly from a matchup card payload.
 
@@ -414,6 +415,12 @@ def simulate_from_card(
             _, batter_id = key
             is_home = batter_is_home.get(batter_id, False)
             matchup_dists[key] = adjust_dist_for_hfa(dist, is_home)
+
+    # Apply outcome recalibration (correct systematic model biases)
+    if calibration_factors:
+        from gamesim.team_quality import recalibrate_dist
+        for key, dist in matchup_dists.items():
+            matchup_dists[key] = recalibrate_dist(dist, calibration_factors)
 
     # Resolve park factors for this game's home ballpark
     game_park_factors = None

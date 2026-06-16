@@ -1,4 +1,4 @@
-"""Team quality adjustment for thin-profile batters.
+"""Team quality, home-field advantage, and outcome calibration adjustments.
 
 Batters with fewer than PA_THRESHOLD plate appearances don't have enough
 data for a reliable profile. Their predicted distributions default toward
@@ -139,4 +139,31 @@ def adjust_dist_for_hfa(
     if total > 0:
         adjusted = {k: v / total for k, v in adjusted.items()}
 
+    return adjusted
+
+
+# ── Outcome recalibration ──
+
+CALIBRATION_PATH = Path("data/run_value/outcome_calibration.json")
+
+
+def load_calibration_factors() -> dict[str, float]:
+    if not CALIBRATION_PATH.exists():
+        return {}
+    with open(CALIBRATION_PATH) as f:
+        data = json.load(f)
+    return data.get("factors", {})
+
+
+def recalibrate_dist(
+    dist: dict[str, float],
+    factors: dict[str, float],
+) -> dict[str, float]:
+    """Apply per-outcome calibration ratios and renormalize."""
+    if not factors:
+        return dist
+    adjusted = {k: v * factors.get(k, 1.0) for k, v in dist.items()}
+    total = sum(adjusted.values())
+    if total > 0:
+        adjusted = {k: v / total for k, v in adjusted.items()}
     return adjusted

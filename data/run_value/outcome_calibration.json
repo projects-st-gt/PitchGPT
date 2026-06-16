@@ -1,0 +1,14 @@
+{
+  "factors": {
+    "K": 1.1086,
+    "BB": 0.9555,
+    "1B": 1.0044,
+    "2B": 0.9594,
+    "3B": 1.05,
+    "HR": 1.1609,
+    "out": 0.9545
+  },
+  "n_pas": 11657,
+  "n_games": 157,
+  "note": "Correction ratio = actual_rate / predicted_rate. Multiply predicted prob by ratio, then renormalize."
+}

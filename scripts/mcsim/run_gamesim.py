@@ -21,7 +21,7 @@ from pathlib import Path
 from gamesim.bullpen import load_batter_stand_lookup
 from gamesim.montecarlo import simulate_from_card
 from gamesim.park import load_park_factors
-from gamesim.team_quality import load_team_quality, load_thin_profile_ids
+from gamesim.team_quality import load_calibration_factors, load_team_quality, load_thin_profile_ids
 from gamesim.transition import BaseOutTransition
 from mcsim.storage import DEFAULT_DB_PATH, init_db, write_prediction
 
@@ -121,12 +121,14 @@ def main() -> None:
     workload_table = _load_workload_table()
     quality_table = load_team_quality()
     thin_ids = load_thin_profile_ids()
+    cal_factors = load_calibration_factors()
     print(f"  transition matrix: loaded")
     print(f"  park factors: {len(park_table)} parks")
     print(f"  batter stands: {len(stand_lookup)} batters")
     print(f"  workload table: {len(workload_table)} pitchers")
     print(f"  team quality: {len(quality_table)} teams")
     print(f"  thin profiles (<100 PAs): {len(thin_ids)} batters")
+    print(f"  calibration factors: {len(cal_factors)} outcomes")
 
     total_games = 0
     total_skipped = 0
@@ -186,6 +188,7 @@ def main() -> None:
                 rotation_pitcher_ids=rotation_ids,
                 team_quality_table=quality_table,
                 thin_profile_ids=thin_ids,
+                calibration_factors=cal_factors,
             )
             elapsed = time.time() - t0
 
